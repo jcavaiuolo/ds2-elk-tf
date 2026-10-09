@@ -8,7 +8,7 @@ Hideki's StackScript [`1059555`](https://cloud.linode.com/stackscripts/1059555) 
 python3 deploy.py
 ```
 
-answer a few questions (press Enter to accept the value in `[brackets]`), wait about 15 minutes, then paste the printed settings into the DataStream 2 destination form.
+answer a few questions (press Enter to accept the value in `[brackets]`, or run `python3 deploy.py --defaults` to take them all), wait about 15 minutes, then paste the printed settings into the DataStream 2 destination form.
 
 ## What the wrapper adds
 
@@ -108,6 +108,7 @@ curl -s -o /dev/null -X TRACE https://<hostname>/
 | Command | What it does |
 |---------|--------------|
 | `python3 deploy.py` | Ask, apply, post-install, summary. Re-run it to change settings (it reuses your previous answers). |
+| `python3 deploy.py --defaults` (`-d`) | Same, but takes every default without asking and skips the confirmations: previous answers if any, otherwise the defaults in the table above, generated passwords and your detected public IP. Needs `LINODE_TOKEN` or a `linode-cli` config. |
 | `python3 deploy.py post-install` | Re-run only the post-install step, for example after fixing DNS for HTTPS. |
 | `python3 deploy.py summary` | Print the Kibana and DataStream 2 settings again. |
 | `python3 deploy.py destroy` | `terraform destroy`. The DataStream 2 stream and Property Manager behaviors are not managed here; remove them in Control Center. |
