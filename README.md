@@ -283,7 +283,6 @@ Removes the instance, firewall, and Block Storage volume. The DataStream 2 strea
 | `README.md` | This file. Full walkthrough. |
 | `post.md` | The updated blog post, ready to publish. Deeper narrative, sizing deep dive, ES|QL section. |
 | `queries/esql.md` | Copy-paste pack of ES|QL queries over DS2 CDN indices. |
-| `stackscript-fork-notes.md` | Delta plan for when we fork Hideki's StackScript. |
 | `terraform/` | Terraform module (providers, variables, main, outputs). |
 | `kibana/akamai-debug.ndjson` | Importable Kibana debug dashboard. |
 | `scripts/build-debug-dashboard.py` | Regenerates the NDJSON above via the Kibana API. Only needed if you edit the dashboard. |
