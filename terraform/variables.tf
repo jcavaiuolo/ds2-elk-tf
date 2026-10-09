@@ -122,17 +122,29 @@ variable "allowed_admin_cidrs" {
 variable "datastream2_ip_acl" {
   type        = list(string)
   description = <<EOT
-IPv4/IPv6 ranges from which DataStream 2 pushes logs. Published by Akamai in January 2026
-(same set used by Origin IP ACL for the CDN). Keep this up to date via:
-  https://techdocs.akamai.com/datastream2/changelog/jan-7-2026-ip-acl-support
-Example (illustrative, replace with the live list):
+IPv4/IPv6 ranges from which DataStream 2 pushes logs. Same set used by
+Origin IP ACL for the Akamai CDN (per the DS2 Jan 7, 2026 changelog).
+
+Live list source:
+  https://techdocs.akamai.com/origin-ip-acl/docs/update-your-origin-server
+  https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt
+  https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv6_CIDRs.txt
+
+Values below mirror the list as of 2026-10-09.
+Subscribe to the Firewall Rules Notification tool in Control Center for updates.
 EOT
   default = [
+    # IPv4
+    "2.16.0.0/13",
+    "23.0.0.0/12",
     "23.32.0.0/11",
     "23.192.0.0/11",
-    "104.64.0.0/10",
+    "95.100.0.0/15",
     "184.24.0.0/13",
-    "2600:1400::/32",
+    # IPv6
+    "2a02:26f0::/32",
+    "2600:1400::/24",
+    "2405:9600::/32",
   ]
 }
 
