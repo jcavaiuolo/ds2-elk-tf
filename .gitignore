@@ -17,6 +17,7 @@ terraform/terraform.tfstate.backup
 terraform/crash.log
 terraform/crash.*.log
 terraform/*.tfplan
+terraform/tfplan*
 tfplan
 
 # Keep provider lockfile per HashiCorp recommendation

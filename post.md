@@ -73,64 +73,83 @@ Versions: Elasticsearch 8 is still the common deployment and 9 is current. The t
 - **ES|QL** (Elasticsearch Query Language), a pipe-based query language that reads like a mix of SPL and Kusto. We will use it below.
 - **Security on by default** since 8.0. If you reuse Hideki's StackScript note that the script explicitly disables TLS on the HTTP layer to keep DS2 destination setup simple. In 2026 we fix that properly with Let's Encrypt or an Akamaized hostname (next section).
 
-## Two ways to deploy
+## Three ways to deploy
 
-Pick the fastest one you can defend to Security.
+Pick the one that matches how your team ships infra. All three land on the same stack and expose the same Kibana URL and the same Elasticsearch `_bulk` endpoint.
 
-### Path A: Akamai Cloud Marketplace (fast)
+### Path A: Akamai Cloud Marketplace (10 minute click-through)
 
-The Akamai Cloud Marketplace has one-click apps for Elasticsearch and Kibana. Choose a Dedicated 8 GB (minimum) compute instance in a region close to your origin, let the Marketplace install run, then jump straight to the "Configure DataStream 2" section below.
+The Akamai Cloud Marketplace has one-click apps for Elasticsearch and Kibana. Pick a Dedicated 8 GB compute instance in a region close to your origin, let the Marketplace install run, then jump to the "Configure DataStream 2" section below. Shortest path, closest to vendor defaults. The dashboards for DS2 are not preloaded, you import them in the Kibana step.
 
-Pros: shortest path, upgrades are easier because it stays close to vendor defaults.
-Trade-off: dashboards and index templates for DS2 are not preloaded, you add them in the Kibana import step below.
+### Path B: Hideki's StackScript (10 minutes, DS2-ready out of the box)
 
-### Path B: Forked StackScript (opinionated)
+Hideki Okamoto maintains the StackScript [`1059555`](https://cloud.linode.com/stackscripts/1059555). It installs Elasticsearch and Kibana, creates the ingest pipelines for CMCD and breadcrumbs, applies an ILM policy, loads the `datastream2` index template, and imports two Kibana dashboards: `Akamai` for the CDN business view and `Akamai Common Media Client Data` for video QoS. It's been active since 2022 and he's shipping updates: the last revision as of this writing was August 2026.
 
-Fork of Hideki's StackScript, with the following bumps:
+In the Cloud UI click **Deploy New Linode**, select the StackScript, fill in the UDFs (SSH user and credentials, Elasticsearch admin password, DS2 ingest user and password). Base image is `linode/ubuntu22.04`. Minimum 8 GB RAM.
 
-- Ubuntu 24.04 LTS base image.
-- Elasticsearch and Kibana 8.x pinned (test against 9.x before adopting).
-- Keeps the pattern of installing both on a single node for the demo. Split for anything production.
-- Updates the preloaded **index template**, **data view**, **visualizations** and **dashboards** to cover the new fields: Bot Manager, Account Protector hints via Security events, EdgeWorkers runtime, CMCD v2, API Protector detections.
-- Leaves security on, generates a self-signed CA for internal cluster TLS, and documents how to swap in a Let's Encrypt cert for the HTTP layer.
+Grab the public IPv4 and the **Reverse DNS** hostname from the instance dashboard. DS2 needs both.
 
-The script is still a two-field UDF: SSH user credentials and admin passwords for Elasticsearch/Kibana and the DS2 ingest user. Deploy on a `g6-dedicated-8` or larger (see the sizing note at the end).
+### Path C: Terraform wrapper (version controlled, reusable)
 
-While the node provisions, note down two things from the Linode dashboard: the public IPv4 and the **Reverse DNS** hostname. You will need both to configure DS2.
+My preferred flow for Partners/SEs/customers: version everything in a repo. [`jcavaiuolo/ds2-elk-tf`](https://github.com/jcavaiuolo/ds2-elk-tf) wraps Path B with a Terraform module that provisions:
 
-[Repo and definition files on GitHub][repo]. The import step below works for either path.
+- Linode compute instance invoking Hideki's StackScript `1059555` (unchanged).
+- A Cloud Firewall that drops everything except SSH and Kibana from your admin CIDR, plus Elasticsearch `9200` only from the Akamai Origin IP ACL (same list DS2 uses to push).
+- A Block Storage volume attached to the compute instance.
+- (Optional, if your region supports it) a VPC and subnet.
 
-[repo]: https://github.com/jcavaiuolo/elasticsearch-kibana-for-akamai-datastream2
+Three commands:
 
-### Note on the "community StackScript" pattern
+```bash
+git clone https://github.com/jcavaiuolo/ds2-elk-tf.git
+cd ds2-elk-tf/terraform
+cp terraform.tfvars.example terraform.tfvars    # edit all the CHANGE-ME values
+export LINODE_TOKEN=...
+terraform init && terraform apply
+```
 
-Hideki's original idea of publishing the install as a shared StackScript was,
-and still is, the right move for a 10-minute demo. It lets any Akamai Cloud
-user hit "Deploy" from the UI and get a working ES/Kibana box without reading
-code. I keep that spirit in the fork and keep the UDF-driven form.
+Terraform outputs `kibana_url`, `elasticsearch_bulk_endpoint`, `reverse_dns_hint`, `public_ipv4`. See the [DEPLOY.md](https://github.com/jcavaiuolo/ds2-elk-tf/blob/main/DEPLOY.md) for the full walkthrough and the regions compatibility note (older regions like `us-east` do not support VPC).
 
-That said, you do not have to be married to the StackScript if your team
-already lives in version-controlled infra. The install logic is a plain Bash
-script, so you can:
+### A quick note on the "community StackScript" pattern
 
-- **Export it as `user_data`** on `linode_instance` (the Terraform module below
-  has a `metadata { user_data = base64encode(file("install.sh")) }` option),
-  and version `install.sh` alongside your Terraform. You lose the UDF form in
-  the Cloud UI; you gain CI/CD-friendly diffs.
-- **Call it from Ansible, Salt, or your config-management tool of choice**
-  after a bare instance comes up. Same script, different driver.
-- **Fork the StackScript** into your own community account if you want to
-  share your variant with your org while keeping the "one-click deploy"
-  button in the Cloud UI.
-
-Hideki's StackScript, my fork, cloud-init, and Ansible all end up running the
-same ~200 lines. Pick the one that matches your operating model.
+Hideki's idea of publishing the install as a shared StackScript was, and still is, the right move for a 10-minute demo. Any Akamai Cloud user can hit "Deploy" from the UI and get a working ES/Kibana box without reading code. Path C adds Terraform around that same StackScript rather than replacing it, so you keep the one-click reproducibility and gain versioned infra. If down the road your team prefers Ansible, cloud-init, or a Helm chart on LKE, the install logic is a plain Bash script and travels easily.
 
 ## First look at Kibana
 
-Browse to `http://[host]:5601/`, log in as `elastic` with the password you set at deploy time. From the sidebar: Analytics -> Dashboard. If you took Path B the "Akamai" dashboard is already there; if you took Path A, import `kibana/export.ndjson` from the repo via Stack Management -> Saved Objects.
+Browse to `http://[host]:5601/`, log in as `elastic` with the password you set at deploy time. From the sidebar: Analytics -> Dashboard. If you took Path B or C the `Akamai` and `Akamai CMCD` dashboards are already there; if you took Path A, import `kibana/export.ndjson` from Hideki's repo via Stack Management -> Saved Objects.
 
 You will see empty panels. That is expected: DS2 has not started pushing yet.
+
+### Import the Akamai Debug dashboard
+
+This is the plug-and-play addition. The repo ships `kibana/akamai-debug.ndjson`, a debug-focused dashboard built from scratch for SE, Partner and customer use. Import it in one call:
+
+```bash
+curl -s -u elastic:<es_admin_password> \
+     -H 'kbn-xsrf: true' \
+     -X POST "http://<host>:5601/api/saved_objects/_import?overwrite=true" \
+     --form file=@kibana/akamai-debug.ndjson
+```
+
+Or in the UI: Stack Management -> Saved Objects -> Import -> pick the file.
+
+You get:
+
+- A dedicated data view `akamai-debug` on top of the same `datastream2,datastream2-*` indices (so it coexists with Hideki's view).
+- A saved search `Akamai Debug: raw log table` with the fields you need to triage a single request.
+- A dashboard `Akamai Debug` with 15 panels and 5 Options List comboboxes at the top for the filters you reach for most while debugging: **Host, Status code, Method, Cache status, Client IP**. The KQL bar handles everything else (path prefix, requestId, etc).
+  - Row 1: Requests over time by status class, Cache HIT/MISS over time.
+  - Row 2: Top 5xx and Top 4xx by host, method, path.
+  - **Row 3: Client IPs with errors.** Table with `cliIP`, `country`, total errors, 4xx count, 5xx count, distinct paths hit. Click a row to pin that IP as a filter across the whole dashboard, or use the Client IP combobox above.
+  - Row 4: Top errorCode, Top securityRules, Hit ratio by host.
+  - Row 5: Origin RTT p50/p95/p99 filtered to cache MISS (so hits do not dilute the metric).
+  - Row 6: Origin retries (empty = healthy), errorCode by host and path.
+  - Row 7: DNS cold lookups by host (empty = edge DNS cache warm), Multi-hop breadcrumbs (empty = direct edge-to-origin), Non-cacheable paths going to origin.
+  - Row 8: Raw log table saved search for drill-down.
+
+Panels like Origin retries, DNS cold lookups and Multi-hop breadcrumbs are intentionally designed to **be empty when the CDN is healthy**. Their titles tell you so, so an empty panel is a signal, not a bug.
+
+If you want to edit the dashboard, use `scripts/build-debug-dashboard.py` in the repo. It re-creates the saved objects via the Kibana API and re-exports a canonical NDJSON that you can commit back.
 
 ## Configure DataStream 2
 
@@ -152,7 +171,7 @@ In the Akamai Control Center, go to COMMON SERVICES -> DataStream and create a s
 - Send compressed data: on.
 - IP ACL on Elasticsearch firewall: paste the DS2 ACL list from the January 2026 changelog.
 
-**Validate & Save.** You should see "Destination details are valid" within a few seconds.
+**Validate & Save.** You will likely see a dialog titled "Validation failed" with a note about Akamai Origin IP addresses. **Click Skip validation.** The Control Center validator probes from an internal IP that is not in the Origin IP ACL (the list of edge push IPs you allowlisted in the firewall), so the probe fails even when the real DS2 push path will work. The dialog itself tells you so.
 
 **Activate.** Tick "Activate stream upon saving" and optionally "Receive an email once activation is complete". Activation takes roughly 90 minutes.
 
@@ -241,9 +260,9 @@ FROM datastream2-cdn-*
 
 A copy-paste pack with these and a few extras lives in `queries/esql.md` in the repo.
 
-## Dashboards worth building
+## Role-specific views (future work)
 
-The dashboard that comes with Path B covers CDN basics. On top of that, four role-specific views pay off:
+Beyond the shipped `Akamai`, `Akamai CMCD` and `Akamai Debug` dashboards, four role-specific views pay off and are good candidates for the next NDJSON in the repo:
 
 **SRE / Delivery.** Edge requests per second, 2xx/4xx/5xx breakdown, offload per CP code, cache status mix, origin RTT P50/P95, map of edge regions. Alerts: origin P95 regression, offload drop.
 
@@ -252,8 +271,6 @@ The dashboard that comes with Path B covers CDN basics. On top of that, four rol
 **Video (CMCD v2).** Buffer starvation `cmcd_bs`, playback rate `cmcd_pr`, measured throughput `cmcd_mtp`, bitrate `cmcd_br`, content ID `cmcd_cid`, session ID `cmcd_sid`, deadline `cmcd_dl`, streaming format `cmcd_sf`. CMCD v2 adds response-side reporting; if you have it enabled in Adaptive Media Delivery, also plot server-side perceived bitrate.
 
 **API view.** For properties fronted by API Protector: top endpoints by error rate, auth failures, suspected API discovery hits (shadow endpoints), rate-limit triggers.
-
-Export each as NDJSON in `kibana/dashboards/` so the next person can import them.
 
 ## Advanced
 
@@ -290,30 +307,87 @@ Order of operations, cheapest to most robust:
 4. **VPC + private subnet.** Put the ES node in a VPC subnet, expose only the Akamaized ingest hostname.
 5. **mTLS to the destination.** Available on supported destinations, worth it for sensitive data.
 
+## Sizing: pick the right Linode for your RPS
+
+Rough rule of thumb based on average 1-1.5 KB uncompressed per DS2 CDN log doc (CMCD and breadcrumbs add ~30% overhead):
+
+| Sustained RPS at edge | Daily raw log volume | Recommended instance | Block Storage | Notes |
+|-----------------------|----------------------|----------------------|----------------|-------|
+| < 50 | 1 to 2 GB | `g6-dedicated-4` (8 GB RAM, 4 vCPU) | 50 GB | Default of this repo. Fine for a demo. |
+| 50 to 200 | 5 to 20 GB | `g6-dedicated-4` | 100 GB | Default of this repo. |
+| 200 to 500 | 20 to 50 GB | `g6-dedicated-8` (16 GB RAM, 8 vCPU) | 200 GB | Bump instance type in `terraform.tfvars`. |
+| 500 to 2000 | 50 to 200 GB | 3-node cluster, `g7-highmem-2` or similar (32 GB RAM each) | 500 GB each | Move to a multi-node topology. The current module does not do this, use LKE + ECK below. |
+| > 2000 | 200+ GB | LKE + ECK on `g7-highmem-4` x N | per-node sizing | Managed Kubernetes with hot/warm/cold node pools and snapshot repo to Object Storage. |
+
+Sampling rate in the DataStream behavior is your fastest escape valve. If you only need a representative view, set it to 10 or 25 instead of 100 and you cut volume linearly.
+
+The [Elastic sizing guide][sizing] remains the best deep reference once you move past the single-node demo.
+
+## Retention: keep storage from exploding
+
+Hideki's StackScript ships an ILM policy named `datastream2-ilm` with a `rollover` action but **no `delete` phase**. Fine for a demo, trouble on a long-running debug stack because indices grow forever until the Block Storage fills up.
+
+For a debug use case, 7 days of hot data covers almost every "what happened at 3am" question. Beyond that, cold storage snapshots are more cost-effective. The quickest fix is to replace the ILM policy with one that includes a `delete` phase. Pick your window:
+
+| Use case | Hot rollover | Delete after |
+|----------|--------------|--------------|
+| Live debug stack | 1 day or 10 GB | **7 days** (default I recommend) |
+| Weekly report feed | 7 days or 50 GB | 30 days |
+| Compliance archive | 1 day or 10 GB | never (snapshot repo to Object Storage) |
+
+The 7-day policy, applied via `curl` from your laptop (or SSH into the box and skip the host/auth bits):
+
+```bash
+curl -s -u elastic:<es_admin_password> \
+     -H 'Content-Type: application/json' \
+     -X PUT "http://<host>:9200/_ilm/policy/datastream2-ilm" \
+     -d '{
+       "policy": {
+         "phases": {
+           "hot": {
+             "min_age": "0ms",
+             "actions": {
+               "set_priority": { "priority": 100 },
+               "rollover": { "max_age": "1d", "max_primary_shard_size": "10gb" }
+             }
+           },
+           "delete": {
+             "min_age": "7d",
+             "actions": { "delete": {} }
+           }
+         }
+       }
+     }'
+```
+
+The policy applies to all indices matching the `datastream2-*` pattern (via the index template that Hideki's StackScript installs). Existing indices older than 7 days get deleted on the next ILM run.
+
+If you want hot indices archived to Akamai Cloud Object Storage before deletion, register an S3 snapshot repository and add a `cold` phase with a `searchable_snapshot` action. Object Storage is S3-compatible so the native `repository-s3` plugin works out of the box.
+
 ## Production checklist
 
-Not changed much from the original list, but updated to 2026 tooling:
-
 - Alert on **Datastream Upload Failures** in Control Center.
-- Right-size the node. For low-traffic properties, 8 GB is fine. For 1k+ req/s start at 32 GB and plan for a 3-node cluster. [Elastic sizing guide][sizing] remains the best starting point.
-- HTTPS on the HTTP layer (above).
-- **Make Elasticsearch nodes redundant.** 3-node minimum for anything load-bearing. Consider **LKE** (Akamai's managed Kubernetes) with the Elastic Cloud on Kubernetes (ECK) operator. Helm/ECK is my current preference over StackScript for production.
+- Sizing: see the table above. Don't start smaller than 8 GB, Elasticsearch won't boot cleanly below.
+- Retention: see the ILM snippet above. Set a `delete` phase before you forget.
+- HTTPS on the Elasticsearch HTTP layer. Let's Encrypt via `certbot --standalone` on port 80, then flip `xpack.security.http.ssl.enabled: true`. DS2 does not accept self-signed.
+- **Make Elasticsearch nodes redundant** for anything load-bearing. 3-node minimum. Consider **LKE** (Akamai's managed Kubernetes) with the Elastic Cloud on Kubernetes (ECK) operator. Helm/ECK is my current preference over StackScript for production.
 - **Block storage** for data volumes on the compute instances.
-- **ILM**. Rollover daily, hot -> warm after 7d, warm -> cold after 30d, then snapshot repository to Akamai Cloud Object Storage. Object Storage is S3-compatible so the native `s3` snapshot plugin works.
-- Lifecycle policy must align with your retention obligations.
-- Watch RAM, GC, and disk pressure in Stack Monitoring.
+- Snapshot repo to Object Storage for anything you want to keep past the hot window.
+- Watch RAM, JVM GC, and disk pressure in Stack Monitoring.
 
 [sizing]: https://www.elastic.co/blog/benchmarking-and-sizing-your-elasticsearch-cluster-for-logs-and-metrics
 
 ## Appendix
 
-- Original post by Hideki Okamoto (September 2022, revised November 2023): [dev.to][orig]
+- Original post by Hideki Okamoto (September 2022, revised August 2026): [dev.to][orig]
+- Hideki's StackScript 1059555: https://cloud.linode.com/stackscripts/1059555
+- This refresh's Terraform + Akamai Debug dashboard repo: https://github.com/jcavaiuolo/ds2-elk-tf
 - DataStream 2 destinations reference: [techdocs.akamai.com][dest]
 - DataStream 2 IP ACL changelog, January 2026: [techdocs.akamai.com][ip-acl]
+- Akamai Origin IP ACL (the live CIDR list for the DS2 firewall): https://techdocs.akamai.com/origin-ip-acl/docs/update-your-origin-server
 - DataStream 2 data set parameters: https://techdocs.akamai.com/datastream2/docs/data-set-parameters
 - DataStream 2 security logs (SIEM via DS2): https://techdocs.akamai.com/datastream2/docs/security-logs
 - Akamai TrafficPeak (managed DS2 destination alternative): https://www.akamai.com/products/trafficpeak
-- Elasticsearch, Kibana for Akamai DataStream 2 (fork): https://github.com/jcavaiuolo/elasticsearch-kibana-for-akamai-datastream2
 - EdgeWorkers Request.setVariable(): https://techdocs.akamai.com/edgeworkers/docs/request-object
 - CMCD specification (CTA WAVE): https://cta.tech/
 
