@@ -28,6 +28,9 @@ instance_type = "g6-dedicated-4" # 8 GB, bump to g6-dedicated-8 or g7 for prod
 # Restrict this to your corp CIDRs / VPN / jump host.
 allowed_admin_cidrs = ["203.0.113.10/32"]
 
+# Block storage for Elasticsearch data (set 0 to disable).
+data_volume_size_gb = 100
+
 ########################################
 # DataStream 2 IP ACL
 ########################################

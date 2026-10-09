@@ -72,24 +72,6 @@ resource "linode_firewall" "elk" {
 }
 
 ########################################
-# Optional VPC
-########################################
-
-resource "linode_vpc" "elk" {
-  count       = var.use_vpc ? 1 : 0
-  label       = "${var.label}-vpc"
-  region      = var.region
-  description = "VPC for ${var.label} Elasticsearch + Kibana"
-}
-
-resource "linode_vpc_subnet" "elk" {
-  count  = var.use_vpc ? 1 : 0
-  vpc_id = linode_vpc.elk[0].id
-  label  = "${var.label}-subnet"
-  ipv4   = var.vpc_subnet_cidr
-}
-
-########################################
 # Compute instance (invokes the StackScript)
 ########################################
 
@@ -117,24 +99,6 @@ resource "linode_instance" "elk" {
     ds2_password           = var.ds2_ingest_password
   }
 
-  # If use_vpc is on, attach a VPC interface in addition to the default public one.
-  dynamic "interface" {
-    for_each = var.use_vpc ? [1] : []
-    content {
-      purpose = "public"
-    }
-  }
-
-  dynamic "interface" {
-    for_each = var.use_vpc ? [1] : []
-    content {
-      purpose   = "vpc"
-      subnet_id = linode_vpc_subnet.elk[0].id
-      ipv4 {
-        vpc = cidrhost(var.vpc_subnet_cidr, 10)
-      }
-    }
-  }
 }
 
 ########################################

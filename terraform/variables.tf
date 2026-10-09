@@ -110,20 +110,8 @@ variable "data_volume_size_gb" {
 }
 
 ########################################
-# Networking: VPC (optional) and Firewall
+# Networking: Firewall
 ########################################
-
-variable "use_vpc" {
-  type        = bool
-  description = "If true, create a VPC and attach the instance to it. Public IP is still issued (edit if you need pure-private)."
-  default     = true
-}
-
-variable "vpc_subnet_cidr" {
-  type        = string
-  description = "VPC subnet CIDR when use_vpc is true."
-  default     = "10.42.0.0/24"
-}
 
 variable "allowed_admin_cidrs" {
   type        = list(string)

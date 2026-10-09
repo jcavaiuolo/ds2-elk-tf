@@ -42,11 +42,6 @@ output "firewall_id" {
   value       = linode_firewall.elk.id
 }
 
-output "vpc_id" {
-  description = "VPC ID (null if use_vpc = false)."
-  value       = var.use_vpc ? linode_vpc.elk[0].id : null
-}
-
 output "volume_id" {
   description = "Block Storage volume ID (null if data_volume_size_gb = 0)."
   value       = var.data_volume_size_gb > 0 ? linode_volume.es_data[0].id : null
