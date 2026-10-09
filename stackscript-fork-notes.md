@@ -4,24 +4,34 @@ Reference: Hideki's original StackScript 1059555
 (https://cloud.linode.com/stackscripts/1059555), mirrored at
 https://github.com/hokamoto/elasticsearch-kibana-for-akamai-datastream2.
 
-Goal: keep the two-field UDF experience (credentials + ES/Kibana admin) and
-10-minute wall clock, but bump everything to current defaults and preload
-2026-era index templates, data views and dashboards.
+**State of the upstream (checked 2026-10-09):** Hideki is actively
+maintaining the script. Last update 2026-08-31 (rev note: "Support Index
+Lifecycle Management"), 717 total deploys / 84 active. The upstream already
+covers Elasticsearch 8.x, a CMCD ingest pipeline, a breadcrumbs ingest
+pipeline, an ILM policy, and dashboards with lookup formatters. The gap
+between upstream and 2026-ideal is smaller than this file originally
+assumed, revised below.
+
+Goal of the fork: keep the two-field UDF experience (credentials + ES/Kibana
+admin) and the 10-minute wall clock, but close the gaps that upstream has
+not shipped: newer base image, security dataset mappings (Bot Manager,
+Account Protector, API Protector), snapshot repo to Object Storage, and
+optional HTTPS via Let's Encrypt.
 
 ## Diff summary
 
-| Area | Original (2022-2023) | Forked (2026) |
-|------|----------------------|---------------|
-| Base image | Ubuntu 20.04 | Ubuntu 24.04 LTS |
-| Elasticsearch | 7.x / early 8.x | 8.x pinned, 9.x opt-in var |
+| Area | Upstream (Aug 2026) | Forked (2026-10 proposal) |
+|------|---------------------|---------------------------|
+| Base image | Ubuntu 22.04 | Ubuntu 24.04 LTS |
+| Elasticsearch | 8.x | 8.x pinned, 9.x opt-in var |
 | Kibana | same as ES | same as ES |
-| HTTP TLS | disabled by script | enabled by default, self-signed CA generated; opt-in Let's Encrypt via UDF |
+| HTTP TLS | disabled by script | opt-in Let's Encrypt via UDF (certbot --standalone) |
 | Node sizing hint | 8 GB | 8 GB minimum, surface 16/32 GB preset in UDF |
-| Index template | 2022 CDN fields | 2026 CDN + CMCD v2 + EdgeWorkers runtime + security fields |
-| Data views | one, `datastream2*` | `datastream2-cdn-*`, `datastream2-sec-*`, `datastream2-ew-*` |
-| Dashboards | one "Akamai" dashboard | four dashboards: Delivery/SRE, Security, Video (CMCD), API |
-| ILM | none | hot/warm/cold with daily rollover; snapshot repo to Akamai Cloud Object Storage |
-| Firewall | script leaves it to user | pre-stages Cloud Firewall rules for DS2 IP ACL (Jan 2026) |
+| Index template | CDN + CMCD + breadcrumbs | add Bot Manager, Account Protector, API Protector, TLS early data fields |
+| Data views | one, `datastream2*` | split: `datastream2-cdn-*`, `datastream2-sec-*`, `datastream2-ew-*` |
+| Dashboards | CDN + CMCD video | add Security (WAF + Bot + AP), API Protector |
+| ILM | rollover 30d / 50 GB (hot only) | add warm/cold phases, snapshot to Object Storage |
+| Firewall | script does basic ufw | no change (TF module handles firewall now) |
 | Snapshots | none | Object Storage snapshot repo configured if S3 creds UDF present |
 
 ## UDF additions
