@@ -108,7 +108,7 @@ export LINODE_TOKEN=...
 terraform init && terraform apply
 ```
 
-Terraform outputs `kibana_url`, `elasticsearch_bulk_endpoint`, `reverse_dns_hint`, `public_ipv4`. See the [DEPLOY.md](https://github.com/jcavaiuolo/ds2-elk-tf/blob/main/DEPLOY.md) for the full walkthrough and the regions compatibility note (older regions like `us-east` do not support VPC).
+Terraform outputs `kibana_url`, `elasticsearch_bulk_endpoint`, `reverse_dns_hint`, `public_ipv4`. See the [README](https://github.com/jcavaiuolo/ds2-elk-tf/blob/main/README.md) for the full walkthrough and the regions compatibility note (older regions like `us-east` do not support VPC).
 
 ### A quick note on the "community StackScript" pattern
 
