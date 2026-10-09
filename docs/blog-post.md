@@ -89,26 +89,23 @@ In the Cloud UI click **Deploy New Linode**, select the StackScript, fill in the
 
 Grab the public IPv4 and the **Reverse DNS** hostname from the instance dashboard. DS2 needs both.
 
-### Path C: Terraform wrapper (version controlled, reusable)
+### Path C: `deploy.py` wrapper (version controlled, reusable)
 
-My preferred flow for Partners/SEs/customers: version everything in a repo. [`jcavaiuolo/ds2-elk-tf`](https://github.com/jcavaiuolo/ds2-elk-tf) wraps Path B with a Terraform module that provisions:
+My preferred flow for Partners/SEs/customers. [`jcavaiuolo/ds2-elk-tf`](https://github.com/jcavaiuolo/ds2-elk-tf) wraps Path B: a small Python script asks a handful of questions (with defaults and generated passwords in `[brackets]`), drives Terraform, waits for Hideki's StackScript `1059555` (unchanged) and finishes the job:
 
-- Linode compute instance invoking Hideki's StackScript `1059555` (unchanged).
-- A Cloud Firewall that drops everything except SSH and Kibana from your admin CIDR, plus Elasticsearch `9200` only from the Akamai Origin IP ACL (same list DS2 uses to push).
-- A Block Storage volume attached to the compute instance.
-- (Optional, if your region supports it) a VPC and subnet.
-
-Three commands:
+- Cloud Firewall: SSH and Kibana only from your IP, Elasticsearch only from the Akamai IP ACL, downloaded fresh on every deploy.
+- Block Storage volume formatted and mounted as the Elasticsearch data directory.
+- 7-day retention added to Hideki's ILM policy (configurable).
+- Optional HTTPS endpoint (nginx + Let's Encrypt).
+- The `Akamai Debug` dashboard imported automatically.
 
 ```bash
 git clone https://github.com/jcavaiuolo/ds2-elk-tf.git
-cd ds2-elk-tf/terraform
-cp terraform.tfvars.example terraform.tfvars    # edit all the CHANGE-ME values
-export LINODE_TOKEN=...
-terraform init && terraform apply
+cd ds2-elk-tf
+python3 deploy.py
 ```
 
-Terraform outputs `kibana_url`, `elasticsearch_bulk_endpoint`, `reverse_dns_hint`, `public_ipv4`. See the [README](https://github.com/jcavaiuolo/ds2-elk-tf/blob/main/README.md) for the full walkthrough and the regions compatibility note (older regions like `us-east` do not support VPC).
+At the end it prints exactly what to type in the DataStream 2 destination form. See the [README](https://github.com/jcavaiuolo/ds2-elk-tf/blob/main/README.md) for details.
 
 ### A quick note on the "community StackScript" pattern
 
@@ -122,7 +119,7 @@ You will see empty panels. That is expected: DS2 has not started pushing yet.
 
 ### Import the Akamai Debug dashboard
 
-This is the plug-and-play addition. The repo ships `kibana/akamai-debug.ndjson`, a debug-focused dashboard built from scratch for SE, Partner and customer use. Import it in one call:
+This is the plug-and-play addition: `kibana/akamai-debug.ndjson`, a debug-focused dashboard built from scratch for SE, Partner and customer use. Path C imports it for you. On Path A or B, import it in one call:
 
 ```bash
 curl -s -u elastic:<es_admin_password> \
@@ -149,7 +146,7 @@ You get:
 
 Panels like Origin retries, DNS cold lookups and Multi-hop breadcrumbs are intentionally designed to **be empty when the CDN is healthy**. Their titles tell you so, so an empty panel is a signal, not a bug.
 
-If you want to edit the dashboard, use `scripts/build-debug-dashboard.py` in the repo. It re-creates the saved objects via the Kibana API and re-exports a canonical NDJSON that you can commit back.
+If you want to edit the dashboard, use `tools/build-debug-dashboard.py` in the repo. It re-creates the saved objects via the Kibana API and re-exports a canonical NDJSON that you can commit back.
 
 ## Configure DataStream 2
 
@@ -190,75 +187,74 @@ Save and activate. Once both DS2 and the property are active, logs begin flowing
 
 ## ES|QL: the fastest way to query DS2 in 2026
 
-If you have not met ES|QL yet, open Kibana -> Discover and switch the query bar to **ES|QL**. It is a left-to-right pipeline that is way friendlier than painting Lens visualizations for one-off questions. Six examples I use on DS2:
+If you have not met ES|QL yet, open Kibana -> Discover and switch the query bar to **ES|QL**. It is a left-to-right pipeline that is way friendlier than painting Lens visualizations for one-off questions. Six examples I use on DS2.
+
+Hideki's index template uses `reqTimeSec` as the time field, keeps `statusCode` as a keyword and marks cache hits as `cacheStatus == "1"`, so the queries follow that.
 
 **Top 5xx by hostname, last hour.**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 1 hour AND status >= 500
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 1 hour AND TO_INTEGER(statusCode) >= 500
 | STATS errors = COUNT(*) BY reqHost
 | SORT errors DESC
 | LIMIT 10
 ```
 
-**Offload by CP code (hit vs miss).**
+**Offload by CP code.**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 24 hours
-| STATS total = COUNT(*), hits = COUNT(CASE WHEN cacheStatus == "HIT" THEN 1 END) BY cp
-| EVAL offload = (hits * 100.0) / total
-| SORT offload DESC
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 24 hours
+| STATS total = COUNT(*), hits = COUNT(*) WHERE cacheStatus == "1" BY cp
+| EVAL offload_pct = ROUND(hits * 100.0 / total, 1)
+| SORT total DESC
 ```
 
-**WAF rule triggers (last 24h, top offenders).**
+**Security rule triggers (last 24h, top offenders).**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 24 hours AND securityRules IS NOT NULL
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 24 hours AND securityRules IS NOT NULL AND securityRules != "-"
 | STATS hits = COUNT(*) BY securityRules
 | SORT hits DESC
 | LIMIT 20
 ```
 
-**Bot score distribution.**
+**Client IPs collecting the most 403s.**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 1 hour AND botScore IS NOT NULL
-| EVAL bucket = CASE
-    WHEN botScore < 25 THEN "0-24"
-    WHEN botScore < 50 THEN "25-49"
-    WHEN botScore < 75 THEN "50-74"
-    ELSE "75-100"
-  END
-| STATS requests = COUNT(*) BY bucket
-| SORT bucket ASC
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 1 hour AND statusCode == "403"
+| STATS denies = COUNT(*), paths = COUNT_DISTINCT(reqPath) BY cliIP, country
+| SORT denies DESC
+| LIMIT 20
 ```
 
-**Origin RTT P95 per URL path.**
+**Turnaround time p95 per URL path on cache misses.**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 1 hour
-| STATS p95_rtt = PERCENTILE(originRTT, 95), reqs = COUNT(*) BY reqPath
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 1 hour AND cacheStatus != "1"
+| EVAL ta = TO_INTEGER(turnAroundTimeMSec)
+| STATS p95_ms = PERCENTILE(ta, 95), reqs = COUNT(*) BY reqHost, reqPath
 | WHERE reqs > 50
-| SORT p95_rtt DESC
+| SORT p95_ms DESC
 | LIMIT 25
 ```
 
-**CMCD video QoS: rebuffering ratio by content ID.**
+**CMCD video QoS: share of requests with a low player buffer, by content ID.**
 
 ```sql
-FROM datastream2-cdn-*
-| WHERE @timestamp > NOW() - 1 hour AND cmcd_cid IS NOT NULL
-| STATS total = COUNT(*), stalls = COUNT(CASE WHEN cmcd_bs IS TRUE THEN 1 END) BY cmcd_cid
-| EVAL stall_pct = (stalls * 100.0) / total
-| SORT stall_pct DESC
+FROM datastream2,datastream2-*
+| WHERE reqTimeSec > NOW() - 1 hour AND cmcd.bl IS NOT NULL
+| STATS total = COUNT(*), low_buffer = COUNT(*) WHERE cmcd.bl < 2000 BY cmcd.cid.keyword
+| EVAL low_buffer_pct = ROUND(low_buffer * 100.0 / total, 1)
+| SORT low_buffer_pct DESC
+| LIMIT 25
 ```
 
-A copy-paste pack with these and a few extras lives in `queries/esql.md` in the repo.
+A copy-paste pack with these and a few extras lives in `docs/esql-queries.md` in the repo.
 
 ## Role-specific views (future work)
 
@@ -302,7 +298,7 @@ Web Security Analytics is still the primary surface for WAF forensics. DS2 is co
 Order of operations, cheapest to most robust:
 
 1. **Cloud Firewall + DS2 IP ACL** (January 2026 feature). Lock port 9200/443 to Akamai IP ranges only. [Changelog][ip-acl].
-2. **Enable TLS on Elasticsearch HTTP layer.** Let's Encrypt via `certbot --standalone` on 80, then flip `xpack.security.http.ssl.enabled: true`. Switch the DS2 endpoint from `http://` to `https://`. DS2 does not accept self-signed.
+2. **TLS on the ingest endpoint.** `deploy.py` offers it: nginx with a Let's Encrypt certificate on 443 proxying to Elasticsearch, port 9200 closed. Point DS2 at `https://<hostname>/_bulk`. DS2 does not accept self-signed certificates.
 3. **Akamaized hostname.** Point DS2 at a hostname served by one of your own properties. The property can enforce WAF, rate limiting, mTLS, and reuse your existing certs. Origin is the Elasticsearch node.
 4. **VPC + private subnet.** Put the ES node in a VPC subnet, expose only the Akamaized ingest hostname.
 5. **mTLS to the destination.** Available on supported destinations, worth it for sensitive data.
@@ -315,7 +311,7 @@ Rough rule of thumb based on average 1-1.5 KB uncompressed per DS2 CDN log doc (
 |-----------------------|----------------------|----------------------|----------------|-------|
 | < 50 | 1 to 2 GB | `g6-dedicated-4` (8 GB RAM, 4 vCPU) | 50 GB | Default of this repo. Fine for a demo. |
 | 50 to 200 | 5 to 20 GB | `g6-dedicated-4` | 100 GB | Default of this repo. |
-| 200 to 500 | 20 to 50 GB | `g6-dedicated-8` (16 GB RAM, 8 vCPU) | 200 GB | Bump instance type in `terraform.tfvars`. |
+| 200 to 500 | 20 to 50 GB | `g6-dedicated-8` (16 GB RAM, 8 vCPU) | 200 GB | Answer a bigger instance type in `deploy.py`. |
 | 500 to 2000 | 50 to 200 GB | 3-node cluster, `g7-highmem-2` or similar (32 GB RAM each) | 500 GB each | Move to a multi-node topology. The current module does not do this, use LKE + ECK below. |
 | > 2000 | 200+ GB | LKE + ECK on `g7-highmem-4` x N | per-node sizing | Managed Kubernetes with hot/warm/cold node pools and snapshot repo to Object Storage. |
 
@@ -327,7 +323,7 @@ The [Elastic sizing guide][sizing] remains the best deep reference once you move
 
 Hideki's StackScript ships an ILM policy named `datastream2-ilm` with a `rollover` action but **no `delete` phase**. Fine for a demo, trouble on a long-running debug stack because indices grow forever until the Block Storage fills up.
 
-For a debug use case, 7 days of hot data covers almost every "what happened at 3am" question. Beyond that, cold storage snapshots are more cost-effective. The quickest fix is to replace the ILM policy with one that includes a `delete` phase. Pick your window:
+For a debug use case, 7 days of hot data covers almost every "what happened at 3am" question. Beyond that, cold storage snapshots are more cost-effective. The fix is to replace the ILM policy with one that includes a `delete` phase; `deploy.py` asks for the window (7 days by default) and applies it. Pick yours:
 
 | Use case | Hot rollover | Delete after |
 |----------|--------------|--------------|
@@ -335,12 +331,12 @@ For a debug use case, 7 days of hot data covers almost every "what happened at 3
 | Weekly report feed | 7 days or 50 GB | 30 days |
 | Compliance archive | 1 day or 10 GB | never (snapshot repo to Object Storage) |
 
-The 7-day policy, applied via `curl` from your laptop (or SSH into the box and skip the host/auth bits):
+To do it by hand, SSH into the box and run (port 9200 is not reachable from your laptop):
 
 ```bash
 curl -s -u elastic:<es_admin_password> \
      -H 'Content-Type: application/json' \
-     -X PUT "http://<host>:9200/_ilm/policy/datastream2-ilm" \
+     -X PUT "http://localhost:9200/_ilm/policy/datastream2-ilm" \
      -d '{
        "policy": {
          "phases": {

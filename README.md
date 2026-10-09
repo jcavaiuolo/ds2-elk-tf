@@ -1,292 +1,215 @@
 # ds2-elk-tf
 
-2026 refresh of Hideki Okamoto's post [*"Visualizing Akamai DataStream 2 logs with Elasticsearch and Kibana on Linode"*](https://dev.to/hokamoto/visualizing-akamai-datastream-2-logs-with-elasticsearch-and-kibana-2c94), with a Terraform deployer for Akamai Cloud and an extra debug-focused Kibana dashboard.
+A deploy wrapper for Hideki Okamoto's [*"Visualizing Akamai DataStream 2 logs with Elasticsearch and Kibana on Linode"*](https://dev.to/hokamoto/visualizing-akamai-datastream-2-logs-with-elasticsearch-and-kibana-2c94).
 
-Plug-and-play: any SE, Partner or customer can clone, run `terraform apply`, import one NDJSON, and get a working stack to analyze DataStream 2 logs end to end.
+Hideki's StackScript [`1059555`](https://cloud.linode.com/stackscripts/1059555) does the real work: it installs Elasticsearch and Kibana, the DataStream 2 ingest pipelines (CMCD and breadcrumbs), the index template, an ILM policy, the `ds2_ingest` user and two dashboards (`Akamai` and `Akamai Common Media Client Data`). This repo wraps it so that the whole experience is:
 
-## What you get
+```bash
+python3 deploy.py
+```
 
-- A single-node Elasticsearch + Kibana box on Akamai Cloud (Linode) provisioned by Terraform.
-- Firewall locked to the Akamai Origin IP ACL on port 9200 (the same list DataStream 2 pushes from).
-- Hideki Okamoto's StackScript (`1059555`) handles the install, including an ingest pipeline for CMCD and breadcrumbs, an ILM policy, index template, and two pre-built dashboards:
-  - `Akamai`, CDN business view.
-  - `Akamai Common Media Client Data`, video QoS view.
-- Extra `Akamai Debug` dashboard shipped as NDJSON in this repo. Imports in one API call. Covers:
-  - Status class and cache HIT/MISS trending.
-  - Top 4xx and 5xx by host, method, path.
-  - **Client IPs with errors** (click a row to pin that IP across the whole dashboard).
-  - Top errorCode, top securityRules, hit ratio by host.
-  - Origin RTT p50/p95/p99 filtered to cache MISS.
-  - Origin retries, errorCode by host and path, DNS cold lookups, breadcrumbs, non-cacheable paths.
-  - Raw log table saved search for drill-down.
-  - 5 Options List comboboxes for Host, Status code, Method, Cache status and Client IP.
+answer a few questions (press Enter to accept the value in `[brackets]`), wait about 15 minutes, then paste the printed settings into the DataStream 2 destination form.
 
-## Prereqs
+## What the wrapper adds
 
-On your machine: `terraform` >= 1.6, `ssh`, `curl`, and Python 3 if you plan to regenerate the dashboard NDJSON. `linode-cli` is handy but optional.
+| | |
+|---|---|
+| **Guided setup** | Asks for everything Terraform needs, with defaults: region, instance type, generated passwords, your public IP for the admin allowlist, an SSH key (created if missing). Answers are saved and become the defaults on the next run. |
+| **Locked-down firewall** | SSH and Kibana only from your IP. Elasticsearch only from the Akamai IP ACL, downloaded fresh from Akamai on every deploy. The firewall is attached at creation, so the instance is never open while installing. |
+| **Data volume** | A Block Storage volume is formatted and mounted as the Elasticsearch data directory (`/var/lib/elasticsearch`). Grow it without touching the instance. |
+| **Retention** | Hideki's ILM policy never deletes, so the disk eventually fills up. The wrapper adds a delete phase (7 days by default). |
+| **Optional HTTPS** | nginx + Let's Encrypt on 443 in front of Elasticsearch, so DataStream 2 credentials and logs travel encrypted. |
+| **Akamai Debug dashboard** | 15 extra panels for troubleshooting, imported automatically (see below). |
+| **ES\|QL pack** | [`docs/esql-queries.md`](docs/esql-queries.md), copy-paste queries that match Hideki's field names. |
 
-## 1. Clone
+## Prerequisites
+
+- `terraform` >= 1.6, `python3` >= 3.8, `ssh`, `scp`, `ssh-keygen`.
+- A Linode Personal Access Token with Read/Write on Linodes, Firewalls and Volumes, and Read on StackScripts: https://cloud.linode.com/profile/tokens. The wrapper reads `LINODE_TOKEN`, then your `linode-cli` config, and otherwise asks for it (never saved to disk).
+- Network access from your machine to `techdocs.akamai.com` (the IP ACL download).
+
+## 1. Deploy
 
 ```bash
 git clone https://github.com/jcavaiuolo/ds2-elk-tf.git
 cd ds2-elk-tf
+python3 deploy.py
 ```
 
-## 2. Get a Linode Personal Access Token
+What it asks:
 
-1. Log in to https://cloud.linode.com/profile/tokens
-2. Create a Personal Access Token with Read/Write on:
-   - Linodes
-   - Firewalls
-   - Volumes
-   - StackScripts (Read)
-3. Export it:
-   ```bash
-   export LINODE_TOKEN=xxxxxxxxxxxxxxxx
-   ```
-4. If you already use `linode-cli`, the Terraform provider can read your CLI token too:
-   ```bash
-   export LINODE_TOKEN=$(awk -F '[ =]+' '/^token *=/{print $2; exit}' ~/.config/linode-cli)
-   ```
-   You can stash that one-liner in `~/.zshrc`.
+| Question | Default |
+|----------|---------|
+| Label, region, instance type | `ds2-elk`, `us-east`, `g6-dedicated-4` (8 GB) |
+| Data volume size | `100` GB (`0` = data stays on the instance disk) |
+| Linode Backups | no |
+| Tags | `ds2,elasticsearch,kibana` |
+| CIDRs allowed to SSH and Kibana | your current public IP `/32` |
+| SSH key | `~/.ssh/ds2-elk-tf` (generated if missing) |
+| SSH sudo user and its password | `elkadmin`, generated |
+| Root password | generated |
+| `elastic` password (Kibana login) | generated |
+| DataStream 2 ingest user and password | `ds2_ingest`, generated |
+| Retention | `7` days (`0` = keep forever) |
+| Import the Akamai Debug dashboard | yes |
+| HTTPS with Let's Encrypt | no; if yes: hostname (empty = the instance's reverse DNS name) and an optional email |
 
-## 3. Create an SSH key for the deploy (optional but recommended)
+Passwords are limited to letters, digits, `_` and `-`, because the StackScript pastes them into JSON and shell strings without escaping.
 
-A dedicated key per project keeps blast radius small:
+Then it:
 
-```bash
-ssh-keygen -t ed25519 -N '' -C "ds2-elk-tf@$(hostname)" -f ~/.ssh/ds2-elk-tf
-```
+1. Shows a review and runs `terraform init`, `plan`, and (after you confirm) `apply`. That creates the firewall, the instance running Hideki's StackScript, and the volume.
+2. Waits for the StackScript to finish, about 10 minutes. It prints an `ssh ... tail -f /var/log/stackscript.log` command if you want to watch.
+3. Runs [`remote/post-install.sh`](remote/post-install.sh) on the instance over SSH (with sudo). It moves the Elasticsearch data onto the volume, applies retention, sets up HTTPS if requested and imports the Akamai Debug dashboard. Every step is idempotent.
+4. Prints the Kibana URL and login, the SSH command, and the DataStream 2 destination settings.
 
-The public key path (`~/.ssh/ds2-elk-tf.pub`) goes into `terraform.tfvars` below.
+Settings and passwords are saved in `terraform/terraform.tfvars.json` and `terraform/deploy.local.json` (gitignored, `chmod 600`). Keep a copy in your password manager.
 
-## 4. Fill `terraform.tfvars`
+## 2. Configure the DataStream 2 stream
 
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-```
+Akamai Control Center -> COMMON SERVICES -> DataStream -> Create stream. Use the values `deploy.py` printed (`python3 deploy.py summary` shows them again):
 
-Edit every `CHANGE-ME` value. Minimum:
+1. Log type: `CDN`. Pick the delivery properties.
+2. Data sets: include all for a first install, trim later. Respect PII.
+3. Format: `JSON`.
+4. Destination: `Elasticsearch`.
+   - Endpoint: `http://<reverse-dns>:9200/_bulk`, or `https://<hostname>/_bulk` with HTTPS.
+   - Index name: `datastream2`.
+   - User name / Password: the DS2 ingest user and password.
+   - Send compressed data: `ON`.
+5. **Validate & Save** reports a failure because the validator probes from a Control Center IP that is not in the ACL. Click **Skip validation**.
+6. Tick "Activate stream upon saving". Activation takes about 90 minutes.
 
-- `root_password`, `ssh_user_password`, `es_admin_password`, `ds2_ingest_password`: four strong passwords. Easy generator: `openssl rand -base64 24 | tr -d '/+='`.
-- `authorized_keys`: paste the contents of `~/.ssh/ds2-elk-tf.pub`.
-- `allowed_admin_cidrs`: your public IP in `/32` form. Get it with `curl ifconfig.me`.
-- `region`, `instance_type`: sensible defaults are `us-east` and `g6-dedicated-4` (8 GB RAM). See [Sizing](#sizing) below for larger traffic.
-- `label`, `ssh_user`: cosmetic.
+## 3. Enable DataStream in Property Manager
 
-Save the passwords in a password manager now, the tfvars file is `gitignored` for a reason.
+In the property fronting your traffic, default rule:
 
-## 5. Apply the Terraform
+- Add the `DataStream` behavior: stream version `v2`, your stream, sampling rate `100` for the demo, **Log Akamai Edge Server IP Address `ON`** (required).
+- Add the `Log Request Details` behavior.
+- Activate on Staging, then Production.
 
-```bash
-terraform init
-terraform plan -out tfplan
-terraform apply tfplan
-```
+## 4. Verify
 
-Expect 3 resources: `linode_firewall`, `linode_instance`, `linode_volume`. VPC is not used by default because older Akamai Cloud regions (such as `us-east`) do not support it. The firewall accepts:
+Send a few requests (`curl -v https://<hostname>/`). After 1 to 2 minutes:
 
-| Rule | From | To | Why |
-|------|------|----|-----|
-| SSH 22/TCP | `allowed_admin_cidrs` | VM | You |
-| Kibana 5601/TCP | `allowed_admin_cidrs` | VM | Your browser |
-| ES 9200/TCP | `datastream2_ip_acl` | VM | DS2 push ingest |
+- Discover, `datastream2` data view: raw rows.
+- `Akamai` dashboard: business panels.
+- `Akamai Debug` dashboard: trending panels. Origin retries, DNS cold lookups and Multi-hop breadcrumbs may stay empty. That means the CDN is healthy, not that something is broken.
 
-Terraform prints outputs like:
-
-```
-elasticsearch_bulk_endpoint = "http://<rdns>:9200/_bulk"
-kibana_url                  = "http://<ip>:5601/"
-public_ipv4                 = "x.x.x.x"
-reverse_dns_hint            = "<ip-dashed>.ip.linodeusercontent.com"
-```
-
-Save the Reverse DNS value, DataStream 2 needs it.
-
-## 6. Wait for the StackScript to finish
-
-The compute instance is `running` right away but Hideki's StackScript (`1059555`) runs for about 10 minutes inside, installing Elasticsearch, Kibana, index templates, ingest pipelines, and importing his dashboards. Monitor:
-
-```bash
-IP=$(terraform output -raw public_ipv4)
-ssh -i ~/.ssh/ds2-elk-tf <ssh_user>@$IP 'sudo tail -f /var/log/stackscript.log'
-```
-
-You are done when the log ends with a Kibana saved objects import success JSON (~25 objects created). Ctrl+C to leave the tail.
-
-Sanity check Elasticsearch from the box (the Cloud Firewall allows 9200 only to the DS2 ACL, not your admin IP, so curl from your laptop will not reach it):
-
-```bash
-ssh -i ~/.ssh/ds2-elk-tf <ssh_user>@$IP \
-    'curl -s -u elastic:<es_admin_password> http://localhost:9200/_cluster/health?pretty'
-```
-
-Expect `status: yellow` (normal on a single-node cluster, the replica of the write index has nowhere to go).
-
-Open Kibana in your browser at the `kibana_url` output. Log in as `elastic` with the Elasticsearch password from `terraform.tfvars`.
-
-## 7. Import the `Akamai Debug` dashboard
-
-The repo ships `kibana/akamai-debug.ndjson`. Import it in one call from the repo root:
-
-```bash
-IP=$(terraform -chdir=terraform output -raw public_ipv4)
-curl -s -u elastic:<es_admin_password> \
-     -H 'kbn-xsrf: true' \
-     -X POST "http://$IP:5601/api/saved_objects/_import?overwrite=true" \
-     --form file=@kibana/akamai-debug.ndjson
-```
-
-Or in the UI: **Stack Management -> Saved Objects -> Import** -> pick `kibana/akamai-debug.ndjson`.
-
-You will see a new data view `akamai-debug`, a saved search `Akamai Debug: raw log table`, and a dashboard `Akamai Debug` with 15 panels and 5 Options List combobox filters (Host, Status code, Method, Cache status, Client IP) at the top.
-
-## 8. Configure the DataStream 2 destination
-
-Akamai Control Center -> COMMON SERVICES -> DataStream -> Create a stream.
-
-1. Log type: `CDN`.
-2. Pick the delivery properties.
-3. Data sets: Include all for a first install, trim later. Respect PII.
-4. Format: `JSON`.
-5. Destination:
-   - Destination: `Elasticsearch`
-   - Display name: your choice
-   - Endpoint: `http://<reverse_dns_hint>:9200/_bulk` (from Terraform outputs)
-   - Index name: `datastream2`
-   - User name: `ds2_ingest`
-   - Password: value of `ds2_ingest_password` from `terraform.tfvars`
-   - Send compressed data: `ON`
-6. Click **Validate & Save**.
-
-> **Validation note.** The Control Center validator does a probe push from an internal Control Center IP that is not in the Origin IP ACL. You will see "Validation failed" with a dialog suggesting Skip. **Click Skip validation.** The actual DS2 push IPs (edge-side, in the Origin IP ACL) will work fine.
-
-7. Tick "Activate stream upon saving". Activation takes about 90 minutes.
-
-## 9. Enable DataStream in Property Manager
-
-In the delivery property fronting your traffic:
-
-- Add `DataStream` and `Log Request Details` behaviors to the default rule.
-- Stream version: `v2`.
-- Stream names: the stream you created.
-- Sampling rate: `100` for the demo.
-- Log Akamai Edge Server IP Address: `ON` (required).
-- Save and activate on **Staging** first, then **Production**.
-
-## 10. Verify
-
-Generate a few requests against your property (`curl -v https://<hostname>/`). After 1 to 2 minutes you should see docs in Kibana:
-
-- Discover with the `datastream2` or `akamai-debug` data view -> raw rows appear.
-- Dashboard `Akamai` -> business panels light up.
-- Dashboard `Akamai Debug` -> trending panels light up. Panels like Origin retries, DNS cold lookups and Multi-hop breadcrumbs may stay empty, which is a **positive health signal**, not a bug.
-
-Generate error traffic to exercise the debug dashboard:
+To exercise the error panels:
 
 ```bash
 for i in {1..10}; do curl -s -o /dev/null https://<hostname>/intentional-404-$i; done
 curl -s -o /dev/null -X TRACE https://<hostname>/
 ```
 
-In 1 to 2 minutes the `Top 4xx` table and the `errorCode by host and path` table will populate.
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `python3 deploy.py` | Ask, apply, post-install, summary. Re-run it to change settings (it reuses your previous answers). |
+| `python3 deploy.py post-install` | Re-run only the post-install step, for example after fixing DNS for HTTPS. |
+| `python3 deploy.py summary` | Print the Kibana and DataStream 2 settings again. |
+| `python3 deploy.py destroy` | `terraform destroy`. The DataStream 2 stream and Property Manager behaviors are not managed here; remove them in Control Center. |
+
+## The Akamai Debug dashboard
+
+Imported as a data view `akamai-debug` (same indices as Hideki's), a saved search `Akamai Debug: raw log table` and a dashboard with 5 filter comboboxes (Host, Status code, Method, Cache status, Client IP):
+
+- Status class and cache HIT/MISS over time.
+- Top 4xx and 5xx by host, method, path.
+- Client IPs with errors (click a row to pin that IP across the dashboard).
+- Top errorCode, top securityRules, hit ratio by host.
+- Turnaround p50/p95/p99 on cache MISS.
+- Origin retries, errorCode by host and path, DNS cold lookups, breadcrumbs, non-cacheable paths.
+- Raw log table for drill-down.
+
+To change it, edit and run `tools/build-debug-dashboard.py` against a running Kibana. It re-creates the objects through the API and re-exports `kibana/akamai-debug.ndjson`:
+
+```bash
+KIBANA_URL=http://$(terraform -chdir=terraform output -raw public_ipv4):5601 \
+KIBANA_USER=elastic KIBANA_PASS=<es_admin_password> \
+python3 tools/build-debug-dashboard.py
+```
+
+## HTTPS
+
+Without HTTPS (the default, same as Hideki's setup), DataStream 2 posts logs and its basic-auth credentials over plain HTTP to port 9200. Only Akamai's ranges can reach that port.
+
+With HTTPS:
+
+- The post-install installs nginx and certbot and gets a Let's Encrypt certificate via HTTP-01 (webroot). nginx then serves `https://<hostname>/` on 443 and proxies to Elasticsearch on localhost.
+- The firewall closes 9200, opens 443 to the Akamai ACL and opens 80 to everyone, because Let's Encrypt validates from undisclosed IPs, both at issuance and on every renewal. nginx answers only ACME challenges on port 80. Renewals run from certbot's systemd timer and reload nginx.
+- Hostname: leave it empty to use the instance's reverse DNS name (`<ip-dashed>.ip.linodeusercontent.com`), which needs no DNS work. For your own name, `deploy.py` prints the A record to create after `apply` and waits until it resolves.
+- Kibana itself stays on HTTP 5601, reachable only from your admin CIDRs.
+
+## DataStream 2 IP ACL
+
+DataStream 2 pushes from the same ranges Akamai publishes for Origin IP ACL. Terraform downloads them on every `plan`:
+
+- https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt
+- https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv6_CIDRs.txt
+
+If Akamai changes the list, the next `python3 deploy.py` shows the firewall diff in the plan and applies it. Subscribe to the Firewall Rules Notification in Control Center to know when to re-run. To pin your own list instead, set `datastream2_ip_acl` in `terraform/terraform.tfvars.json`.
 
 ## Sizing
 
-Rough rule of thumb based on ~1-1.5 KB uncompressed per DS2 CDN log doc (CMCD and breadcrumbs add ~30%):
+Rough rule of thumb, based on about 1 to 1.5 KB uncompressed per DS2 CDN log document (CMCD and breadcrumbs add about 30%):
 
-| Sustained RPS at edge | Daily raw log volume | Instance type | Block storage |
-|-----------------------|----------------------|---------------|----------------|
+| Sustained RPS at edge | Daily raw log volume | Instance type | Data volume |
+|-----------------------|----------------------|---------------|-------------|
 | < 50 | 1-2 GB | `g6-dedicated-4` (8 GB) | 50 GB |
 | 50-200 | 5-20 GB | `g6-dedicated-4` | 100 GB (default) |
 | 200-500 | 20-50 GB | `g6-dedicated-8` (16 GB) | 200 GB |
 | 500-2000 | 50-200 GB | multi-node, 32 GB each | 500 GB each |
 | > 2000 | 200+ GB | LKE + ECK | per-node |
 
-Change `instance_type` and `data_volume_size_gb` in `terraform.tfvars` and re-apply. Sampling rate in the DataStream behavior is your fastest escape valve: 10 or 25 instead of 100 cuts volume linearly.
-
-See `post.md` for the deep dive and when to graduate to ECK on LKE.
+Re-run `python3 deploy.py` with a bigger instance type or volume. Linode resizes the volume online, but the ext4 filesystem must then be grown by hand (`sudo resize2fs /dev/disk/by-id/scsi-0Linode_Volume_<label>-data`). The single-node rows are what this repo deploys. Above that, see `docs/blog-post.md`. The sampling rate in the DataStream behavior is the fastest escape valve: 10 or 25 instead of 100 cuts volume linearly.
 
 ## Retention
 
-Hideki's StackScript ships an ILM policy with a `rollover` action but **no `delete` phase**, so indices grow forever. For a debug stack, 7 days of hot data covers almost every "what happened at 3am" question. Apply this policy once:
+Hideki's `datastream2-ilm` policy rolls the write index over at 30 days or 50 GB and never deletes anything. With retention set to N days, the post-install rewrites the policy to roll over daily (or at 10 GB) and delete each index N days after its rollover. Disk usage then stays at roughly N+1 days of logs.
 
-```bash
-IP=$(terraform -chdir=terraform output -raw public_ipv4)
-ssh -i ~/.ssh/ds2-elk-tf <ssh_user>@$IP \
-    'curl -s -u elastic:<es_admin_password> \
-         -H "Content-Type: application/json" \
-         -X PUT "http://localhost:9200/_ilm/policy/datastream2-ilm" \
-         -d "{\"policy\":{\"phases\":{\"hot\":{\"min_age\":\"0ms\",\"actions\":{\"set_priority\":{\"priority\":100},\"rollover\":{\"max_age\":\"1d\",\"max_primary_shard_size\":\"10gb\"}}},\"delete\":{\"min_age\":\"7d\",\"actions\":{\"delete\":{}}}}}}"'
-```
+| Use case | Retention |
+|----------|-----------|
+| Live debug stack | 7 days (default) |
+| Weekly report feed | 30 days |
+| Compliance archive | 0 (keep forever) and snapshot to Object Storage |
 
-Hot indices roll over daily (or at 10 GB), old indices get deleted after 7 days. Tune the window:
+To change it, re-run `python3 deploy.py` (or `post-install`) with a new value. Setting `0` later does not restore Hideki's original policy.
 
-| Use case | Hot rollover | Delete after |
-|----------|--------------|--------------|
-| Live debug stack | 1 day or 10 GB | 7 days (default I recommend) |
-| Weekly report feed | 7 days or 50 GB | 30 days |
-| Compliance archive | 1 day or 10 GB | never (snapshot repo to Object Storage) |
+## Using Terraform directly
+
+`terraform/` is a plain module, and `deploy.py` only writes `terraform/terraform.tfvars.json` and calls it. Required variables: `root_password`, `ssh_user_password`, `es_admin_password`, `ds2_ingest_password`, `allowed_admin_cidrs`, plus `authorized_keys` with your public key. See `terraform/variables.tf` for the rest. The post-install step (volume, retention, HTTPS, dashboard) still needs `python3 deploy.py post-install`, which reads the same `terraform.tfvars.json`.
 
 ## Troubleshooting
 
-- **Terraform error "unauthorized"**: `LINODE_TOKEN` not exported, or expired.
-- **Terraform error "This region does not support VPCs at this time"**: the Terraform module no longer uses VPCs by default, update to the current version.
-- **Terraform error "The requested distribution is not supported by this stackscript"**: Hideki's StackScript 1059555 is pinned to `linode/ubuntu22.04`. The module's default matches. If you overrode `image`, revert.
-- **DataStream 2 shows "100% Uploads failed" right after activating**: the Cloud Firewall ACL may have been updated after the stream was activated. The last 7/N count in Control Center tracks the past 24h, it recovers as new successes accumulate. Confirm pushes are landing by checking the ES doc count:
+- **"unauthorized" from Terraform**: the token is missing or expired. `deploy.py` checks it against the Linode API before starting.
+- **"Could not download the Akamai IP ACL"**: `techdocs.akamai.com` was unreachable from your machine. Retry, or pin `datastream2_ip_acl`.
+- **"The requested distribution is not supported by this stackscript"**: StackScript 1059555 only supports `linode/ubuntu22.04`, the module's default image.
+- **Timed out waiting for the StackScript**: SSH in and read `/var/log/stackscript.log`. The usual cause is too little RAM; use `g6-dedicated-8`. Then run `python3 deploy.py post-install`.
+- **Post-install failed**: it is idempotent. Fix the cause shown in the output and run `python3 deploy.py post-install`.
+- **Let's Encrypt fails**: the hostname must resolve to the instance and port 80 must be reachable. Check `sudo journalctl -u nginx` and `/var/log/letsencrypt/letsencrypt.log`.
+- **DataStream 2 shows "100% Uploads failed" right after activating**: the counter covers the last 24 hours and recovers as successes accumulate. Check that documents are arriving:
   ```bash
-  ssh -i ~/.ssh/ds2-elk-tf <ssh_user>@$IP \
-      'curl -s -u elastic:<pw> http://localhost:9200/datastream2*/_count'
+  ssh -i ~/.ssh/ds2-elk-tf elkadmin@<ip> \
+      'curl -s -u elastic:<es_admin_password> http://localhost:9200/datastream2*/_count'
   ```
-- **DS2 push IPs look different from the ACL**: open the firewall briefly to `0.0.0.0/0`, capture with tcpdump on the server to see the actual push IPs, then narrow back down:
-  ```bash
-  export LINODE_TOKEN=...
-  terraform -chdir=terraform apply -var='datastream2_ip_acl=["0.0.0.0/0","::/0"]' -auto-approve
-  # ... capture / verify ...
-  terraform -chdir=terraform apply -auto-approve   # reverts to the ACL default
-  ```
-- **"Validation failed" during the DS2 destination test**: click **Skip validation**. The validator probes from a Control Center IP that is not in the Origin IP ACL, this is expected.
-- **StackScript stuck**: `systemctl status elasticsearch kibana`. Check `/var/log/elasticsearch/*.log`. Common cause is too little RAM, bump the `instance_type` to `g6-dedicated-8`.
-- **Kibana login loops**: reset the admin password on the box:
-  ```bash
-  sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic
-  ```
-- **DS2 ACL has to be refreshed**: Akamai publishes the current list at https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt and `..._ipv6_CIDRs.txt`. Replace the `datastream2_ip_acl` default and re-apply.
-
-## Regenerate the debug dashboard
-
-Only needed if you want to edit the dashboard definitions:
-
-```bash
-KIBANA_URL=http://$(terraform -chdir=terraform output -raw public_ipv4):5601 \
-KIBANA_USER=elastic \
-KIBANA_PASS=<es_admin_password> \
-python3 scripts/build-debug-dashboard.py
-```
-
-The script creates the saved objects via the Kibana API, then exports them back to `kibana/akamai-debug.ndjson`. Commit the regenerated file so others see your changes.
-
-## Teardown
-
-```bash
-cd terraform
-terraform destroy
-```
-
-Removes the instance, firewall, and Block Storage volume. The DataStream 2 stream and the Property Manager changes are not managed by Terraform, delete them from Control Center manually.
+- **Pushes come from IPs outside the ACL**: pin `datastream2_ip_acl` to `["0.0.0.0/0", "::/0"]` briefly, capture with `tcpdump` on the instance, then remove the pin.
+- **Kibana login loops**: `sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic`, then put the new password in `terraform.tfvars.json`.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `README.md` | This file. Full walkthrough. |
-| `post.md` | The updated blog post, ready to publish. Deeper narrative, sizing deep dive, ES|QL section. |
-| `queries/esql.md` | Copy-paste pack of ES|QL queries over DS2 CDN indices. |
-| `terraform/` | Terraform module (providers, variables, main, outputs). |
-| `kibana/akamai-debug.ndjson` | Importable Kibana debug dashboard. |
-| `scripts/build-debug-dashboard.py` | Regenerates the NDJSON above via the Kibana API. Only needed if you edit the dashboard. |
+| `deploy.py` | The interactive wrapper. Python standard library only. |
+| `terraform/` | Firewall, instance (Hideki's StackScript) and data volume. |
+| `remote/post-install.sh` | Runs on the instance after the StackScript: volume, retention, HTTPS, dashboard import. |
+| `kibana/akamai-debug.ndjson` | The Akamai Debug dashboard. |
+| `tools/build-debug-dashboard.py` | Regenerates the NDJSON above. Only needed to edit the dashboard. |
+| `docs/esql-queries.md` | ES\|QL query pack for Hideki's index. |
+| `docs/blog-post.md` | The updated blog post: background, sizing deep dive, hardening. |
 
 ## Credits
 
-Original architecture, StackScript, ingest pipelines and `Akamai` / `Akamai CMCD` dashboards by [Hideki Okamoto](https://dev.to/hokamoto). This repo keeps his bones, wraps Terraform around them for Akamai Cloud 2026 defaults, and adds the `Akamai Debug` dashboard.
+Original architecture, StackScript, ingest pipelines and the `Akamai` / `Akamai Common Media Client Data` dashboards by [Hideki Okamoto](https://dev.to/hokamoto). This repo only wraps his work for a one-command deploy and adds the `Akamai Debug` dashboard.

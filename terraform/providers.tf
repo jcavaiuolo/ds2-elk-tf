@@ -6,14 +6,13 @@ terraform {
       source  = "linode/linode"
       version = "~> 2.30"
     }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.4"
     }
   }
 }
 
 provider "linode" {
   # Reads LINODE_TOKEN from env by default.
-  # token = var.linode_token
 }

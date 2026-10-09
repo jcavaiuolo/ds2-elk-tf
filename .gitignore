@@ -5,6 +5,8 @@
 terraform/terraform.tfvars
 terraform/*.auto.tfvars
 terraform/*.tfvars.json
+terraform/deploy.local.json
+terraform/known_hosts
 .env
 *.pem
 *.key
