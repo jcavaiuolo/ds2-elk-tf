@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Secrets / local config
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+terraform/*.tfvars.json
+.env
+*.pem
+*.key
+
+# Terraform state and plugin caches
+terraform/.terraform/
+terraform/.terraform.tfstate.*.backup
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/crash.log
+terraform/crash.*.log
+terraform/*.tfplan
+tfplan
+
+# Keep provider lockfile per HashiCorp recommendation
+!terraform/.terraform.lock.hcl
+
+# Editor / local junk
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node / Python crumbs if any
+node_modules/
+__pycache__/
+*.pyc
