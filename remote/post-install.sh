@@ -6,7 +6,10 @@
 # skips what is already done.
 #
 #   1. Move Elasticsearch data onto the attached Block Storage volume.
-#   2. Add a delete phase to the datastream2-ilm policy (retention).
+#   2. Keep the disk from filling up: retention and force merge in the
+#      datastream2-ilm policy, best_compression and 0 replicas in the index
+#      template, and a systemd timer that deletes the oldest indices when
+#      the disk passes a threshold.
 #   3. Optionally front Elasticsearch with nginx + Let's Encrypt on 443.
 #   4. Import the Akamai Debug dashboard into Kibana.
 #
@@ -15,6 +18,7 @@
 #   ES_PASSWORD       password of the 'elastic' user
 #   VOLUME_DEVICE     /dev/disk/by-id/... of the data volume, empty = skip
 #   RETENTION_DAYS    delete indices after N days, 0 = keep forever
+#   DISK_MAX_PCT      delete oldest indices above this disk usage, 0 = off
 #   IMPORT_DASHBOARD  yes|no
 #   TLS_HOSTNAME      hostname for the certificate, empty = no TLS
 #   TLS_EMAIL         Let's Encrypt account email, may be empty
@@ -30,6 +34,9 @@ source "$ENV_FILE"
 
 ES_URL="http://localhost:9200"
 KIBANA_URL="http://localhost:5601"
+
+DATA_DIR="$(awk -F': *' '/^path\.data:/ {print $2}' /etc/elasticsearch/elasticsearch.yml | tr -d '"' | head -1)"
+DATA_DIR="${DATA_DIR:-/var/lib/elasticsearch}"
 
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -57,9 +64,7 @@ mount_volume() {
     return
   fi
 
-  local data_dir
-  data_dir="$(awk -F': *' '/^path\.data:/ {print $2}' /etc/elasticsearch/elasticsearch.yml | tr -d '"' | head -1)"
-  data_dir="${data_dir:-/var/lib/elasticsearch}"
+  local data_dir="$DATA_DIR"
 
   if mountpoint -q "$data_dir"; then
     log "$data_dir is already on its own mount, skipping volume setup"
@@ -107,30 +112,104 @@ mount_volume() {
 }
 
 ########################################
-# 2. Retention (ILM delete phase)
+# 2. Disk protection
 ########################################
 
-apply_retention() {
-  wait_for "Elasticsearch" es_ready
-  if [ "${RETENTION_DAYS:-0}" -le 0 ]; then
-    log "Retention: keeping Hideki's ILM policy as is (rollover only, indices are never deleted)"
+es_put() { curl -fsS -u "elastic:$ES_PASSWORD" -H 'Content-Type: application/json' -X PUT "$ES_URL$1" -d "$2"; echo; }
+
+ilm_policy() {
+  # Hideki's policy rolls over at 30d / 50gb and never deletes. With a
+  # retention window, roll over daily so deletes happen close to it.
+  local rollover='{"max_age":"30d","max_primary_shard_size":"50gb"}'
+  local delete_phase=""
+  if [ "${RETENTION_DAYS:-0}" -gt 0 ]; then
+    rollover='{"max_age":"1d","max_primary_shard_size":"10gb"}'
+    delete_phase=',"delete":{"min_age":"'"$RETENTION_DAYS"'d","actions":{"delete":{}}}'
+    log "ILM: roll over daily (or at 10 GB), force merge, delete ${RETENTION_DAYS}d after rollover"
+  else
+    log "ILM: Hideki's rollover (30 days or 50 GB) plus force merge, indices are never deleted by age"
+  fi
+  # warm: once an index stops receiving writes, merge it to one segment and
+  # recompress it with best_compression (frees space from deleted docs too).
+  es_put /_ilm/policy/datastream2-ilm '{"policy":{"phases":{
+    "hot":{"min_age":"0ms","actions":{"set_priority":{"priority":100},"rollover":'"$rollover"'}},
+    "warm":{"min_age":"0ms","actions":{"set_priority":{"priority":50},"forcemerge":{"max_num_segments":1,"index_codec":"best_compression"}}}'"$delete_phase"'
+  }}}'
+}
+
+index_settings() {
+  log "Index template: best_compression, 0 replicas (single node)"
+  ES_PASSWORD="$ES_PASSWORD" python3 - <<'PY'
+import base64, json, os, urllib.request
+
+auth = "Basic " + base64.b64encode(f"elastic:{os.environ['ES_PASSWORD']}".encode()).decode()
+
+def call(method, path, body=None):
+    req = urllib.request.Request("http://localhost:9200" + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": auth, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read() or b"{}")
+
+name = "logs-akamai.datastream2"
+template = call("GET", f"/_index_template/{name}")["index_templates"][0]["index_template"]
+# Only send back what PUT accepts (GET can carry read-only metadata).
+allowed = {"index_patterns", "template", "composed_of", "priority", "version", "_meta",
+           "data_stream", "allow_auto_create", "ignore_missing_component_templates", "deprecated"}
+template = {k: v for k, v in template.items() if k in allowed}
+index = template.setdefault("template", {}).setdefault("settings", {}).setdefault("index", {})
+index["codec"] = "best_compression"
+index["number_of_replicas"] = "0"
+call("PUT", f"/_index_template/{name}", template)
+print(f"updated {name}")
+PY
+  # Existing indices: replicas can change live (codec applies at force merge).
+  es_put "/datastream2-*/_settings" '{"index":{"number_of_replicas":0}}'
+}
+
+install_disk_guard() {
+  if [ "${DISK_MAX_PCT:-0}" -le 0 ]; then
+    log "Disk guard: disabled"
+    systemctl disable --now ds2-elk-disk-guard.timer 2>/dev/null || true
     return
   fi
+  log "Disk guard: delete the oldest datastream2 indices when $DATA_DIR passes ${DISK_MAX_PCT}%"
+  install -m 0755 "$HERE/disk-guard.py" /usr/local/sbin/ds2-elk-disk-guard
+  install -d -m 0700 /etc/ds2-elk
+  ( umask 077
+    printf 'ES_PASSWORD=%s\nMAX_PCT=%s\nDATA_DIR=%s\n' "$ES_PASSWORD" "$DISK_MAX_PCT" "$DATA_DIR" \
+      > /etc/ds2-elk/disk-guard.env )
 
-  # Hideki's policy rolls over at 30d / 50gb and never deletes. Rolling over
-  # daily keeps the delete granularity close to the requested window.
-  log "Retention: roll over daily (or at 10 GB), delete indices ${RETENTION_DAYS}d after rollover"
-  local body
-  body="$(cat <<EOF
-{"policy":{"phases":{
-  "hot":{"min_age":"0ms","actions":{"set_priority":{"priority":100},"rollover":{"max_age":"1d","max_primary_shard_size":"10gb"}}},
-  "delete":{"min_age":"${RETENTION_DAYS}d","actions":{"delete":{}}}
-}}}
+  cat > /etc/systemd/system/ds2-elk-disk-guard.service <<EOF
+[Unit]
+Description=Delete the oldest DataStream 2 indices when the disk is nearly full
+After=elasticsearch.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ds2-elk-disk-guard
 EOF
-)"
-  curl -fsS -u "elastic:$ES_PASSWORD" -H 'Content-Type: application/json' \
-    -X PUT "$ES_URL/_ilm/policy/datastream2-ilm" -d "$body"
-  echo
+  cat > /etc/systemd/system/ds2-elk-disk-guard.timer <<EOF
+[Unit]
+Description=Run ds2-elk-disk-guard every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now ds2-elk-disk-guard.timer
+  /usr/local/sbin/ds2-elk-disk-guard || true
+}
+
+protect_disk() {
+  wait_for "Elasticsearch" es_ready
+  ilm_policy
+  index_settings
+  install_disk_guard
 }
 
 ########################################
@@ -238,7 +317,7 @@ import_dashboard() {
 }
 
 mount_volume
-apply_retention
+protect_disk
 setup_tls
 import_dashboard
 
