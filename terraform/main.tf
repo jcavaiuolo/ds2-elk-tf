@@ -30,10 +30,12 @@ locals {
     for cidr in concat(local.fetched_ipv4, local.fetched_ipv6) : cidr if can(cidrhost(cidr, 0))
   ])
 
-  ds2_acl_ipv4 = [for cidr in local.ds2_acl : cidr if !strcontains(cidr, ":")]
-  ds2_acl_ipv6 = [for cidr in local.ds2_acl : cidr if strcontains(cidr, ":")]
-  admin_ipv4   = [for cidr in var.allowed_admin_cidrs : cidr if !strcontains(cidr, ":")]
-  admin_ipv6   = [for cidr in var.allowed_admin_cidrs : cidr if strcontains(cidr, ":")]
+  # The Linode provider rejects empty ipv4/ipv6 lists in a firewall rule, so an
+  # address family with no entries becomes null.
+  ds2_acl_ipv4 = try(coalescelist([for cidr in local.ds2_acl : cidr if !strcontains(cidr, ":")]), null)
+  ds2_acl_ipv6 = try(coalescelist([for cidr in local.ds2_acl : cidr if strcontains(cidr, ":")]), null)
+  admin_ipv4   = try(coalescelist([for cidr in var.allowed_admin_cidrs : cidr if !strcontains(cidr, ":")]), null)
+  admin_ipv6   = try(coalescelist([for cidr in var.allowed_admin_cidrs : cidr if strcontains(cidr, ":")]), null)
   public_ipv4  = tolist(linode_instance.elk.ipv4)[0]
   rdns_host    = "${replace(local.public_ipv4, ".", "-")}.ip.linodeusercontent.com"
   tls_hostname = var.tls_hostname != "" ? var.tls_hostname : local.rdns_host

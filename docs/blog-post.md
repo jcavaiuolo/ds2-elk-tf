@@ -94,7 +94,7 @@ Grab the public IPv4 and the **Reverse DNS** hostname from the instance dashboar
 My preferred flow for Partners/SEs/customers. [`jcavaiuolo/ds2-elk-tf`](https://github.com/jcavaiuolo/ds2-elk-tf) wraps Path B: a small Python script asks a handful of questions (with defaults and generated passwords in `[brackets]`), drives Terraform, waits for Hideki's StackScript `1059555` (unchanged) and finishes the job:
 
 - Cloud Firewall: SSH and Kibana only from your IP, Elasticsearch only from the Akamai IP ACL, downloaded fresh on every deploy.
-- Block Storage volume formatted and mounted as the Elasticsearch data directory.
+- Elasticsearch data on the plan's local disk, or on an extra Block Storage volume when you need more space.
 - 7-day retention added to Hideki's ILM policy (configurable).
 - Optional HTTPS endpoint (nginx + Let's Encrypt).
 - The `Akamai Debug` dashboard imported automatically.
@@ -307,21 +307,23 @@ Order of operations, cheapest to most robust:
 
 Rough rule of thumb based on average 1-1.5 KB uncompressed per DS2 CDN log doc (CMCD and breadcrumbs add ~30% overhead):
 
-| Sustained RPS at edge | Daily raw log volume | Recommended instance | Block Storage | Notes |
-|-----------------------|----------------------|----------------------|----------------|-------|
-| < 50 | 1 to 2 GB | `g6-dedicated-4` (8 GB RAM, 4 vCPU) | 50 GB | Default of this repo. Fine for a demo. |
-| 50 to 200 | 5 to 20 GB | `g6-dedicated-4` | 100 GB | Default of this repo. |
-| 200 to 500 | 20 to 50 GB | `g6-dedicated-8` (16 GB RAM, 8 vCPU) | 200 GB | Answer a bigger instance type in `deploy.py`. |
+| Sustained RPS at edge | Daily raw log volume | Recommended instance | Extra Block Storage (7-day retention) | Notes |
+|-----------------------|----------------------|----------------------|----------------------------------------|-------|
+| < 50 | 1 to 2 GB | `g6-dedicated-4` (8 GB RAM, 4 vCPU, 160 GB disk) | none | Default of this repo. Fine for a demo. |
+| 50 to 200 | 5 to 20 GB | `g6-dedicated-4` | none up to ~15 GB/day, else 100 to 200 GB | Default of this repo. |
+| 200 to 500 | 20 to 50 GB | `g6-dedicated-8` (16 GB RAM, 8 vCPU, 320 GB disk) | 200 GB at the top of the range | Answer a bigger instance type in `deploy.py`. |
 | 500 to 2000 | 50 to 200 GB | 3-node cluster, `g7-highmem-2` or similar (32 GB RAM each) | 500 GB each | Move to a multi-node topology. The current module does not do this, use LKE + ECK below. |
 | > 2000 | 200+ GB | LKE + ECK on `g7-highmem-4` x N | per-node sizing | Managed Kubernetes with hot/warm/cold node pools and snapshot repo to Object Storage. |
 
 Sampling rate in the DataStream behavior is your fastest escape valve. If you only need a representative view, set it to 10 or 25 instead of 100 and you cut volume linearly.
 
+The plan's local disk is included in the price and is faster than network Block Storage, so fill it first and add a volume only when retention or traffic outgrows it.
+
 The [Elastic sizing guide][sizing] remains the best deep reference once you move past the single-node demo.
 
 ## Retention: keep storage from exploding
 
-Hideki's StackScript ships an ILM policy named `datastream2-ilm` with a `rollover` action but **no `delete` phase**. Fine for a demo, trouble on a long-running debug stack because indices grow forever until the Block Storage fills up.
+Hideki's StackScript ships an ILM policy named `datastream2-ilm` with a `rollover` action but **no `delete` phase**. Fine for a demo, trouble on a long-running debug stack because indices grow forever until the disk fills up.
 
 For a debug use case, 7 days of hot data covers almost every "what happened at 3am" question. Beyond that, cold storage snapshots are more cost-effective. The fix is to replace the ILM policy with one that includes a `delete` phase; `deploy.py` asks for the window (7 days by default) and applies it. Pick yours:
 
@@ -365,9 +367,9 @@ If you want hot indices archived to Akamai Cloud Object Storage before deletion,
 - Alert on **Datastream Upload Failures** in Control Center.
 - Sizing: see the table above. Don't start smaller than 8 GB, Elasticsearch won't boot cleanly below.
 - Retention: see the ILM snippet above. Set a `delete` phase before you forget.
-- HTTPS on the Elasticsearch HTTP layer. Let's Encrypt via `certbot --standalone` on port 80, then flip `xpack.security.http.ssl.enabled: true`. DS2 does not accept self-signed.
+- HTTPS on the ingest endpoint (`deploy.py` sets up nginx + Let's Encrypt). DS2 does not accept self-signed certificates.
 - **Make Elasticsearch nodes redundant** for anything load-bearing. 3-node minimum. Consider **LKE** (Akamai's managed Kubernetes) with the Elastic Cloud on Kubernetes (ECK) operator. Helm/ECK is my current preference over StackScript for production.
-- **Block storage** for data volumes on the compute instances.
+- **Block storage** for data volumes once the plan's local disk is not enough.
 - Snapshot repo to Object Storage for anything you want to keep past the hot window.
 - Watch RAM, JVM GC, and disk pressure in Stack Monitoring.
 

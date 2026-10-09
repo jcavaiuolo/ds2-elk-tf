@@ -106,8 +106,8 @@ variable "ds2_ingest_password" {
 
 variable "data_volume_size_gb" {
   type        = number
-  description = "Block Storage volume for Elasticsearch data, mounted by the post-install step. Set 0 to keep data on the instance disk."
-  default     = 100
+  description = "Extra Block Storage volume for Elasticsearch data, mounted by the post-install step. 0 = use the disk included in the plan (160 GB on g6-dedicated-4)."
+  default     = 0
 }
 
 ########################################

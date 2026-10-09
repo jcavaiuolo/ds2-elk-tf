@@ -4,11 +4,13 @@ Interactive deployer for Hideki Okamoto's DataStream 2 + Elasticsearch + Kibana
 StackScript (1059555) on Akamai Cloud.
 
     python3 deploy.py                 ask, terraform apply, post-install, print DS2 settings
+    python3 deploy.py --defaults      same, accepting every default without asking
     python3 deploy.py post-install    re-run the post-install step on an existing deploy
     python3 deploy.py summary         print the DataStream 2 / Kibana settings again
     python3 deploy.py destroy         terraform destroy
 
-Every question shows a default in [brackets]; press Enter to accept it. Answers
+Every question shows a default in [brackets]; press Enter to accept it, or pass
+--defaults to accept them all and skip the confirmations. Answers
 are saved to terraform/terraform.tfvars.json and terraform/deploy.local.json
 (both gitignored, chmod 600) and become the defaults on the next run.
 
@@ -46,6 +48,9 @@ PASSWORD_RE = re.compile(r"^[A-Za-z0-9_-]{12,128}$")
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 STACKSCRIPT_TIMEOUT = 45 * 60
 
+# Set by --defaults: every question takes its default without prompting.
+ACCEPT_DEFAULTS = False
+
 
 ########################################
 # Terminal helpers
@@ -69,6 +74,14 @@ def ask(label, default=None, validate=None, help_text=None):
     if help_text:
         print(f"  {help_text}")
     shown = f" [{default}]" if default not in (None, "") else ""
+    if ACCEPT_DEFAULTS:
+        if default is None:
+            die(f"'{label}' has no default. Run without --defaults to answer it.")
+        error = validate(str(default)) if validate else None
+        if error:
+            die(f"Default for '{label}' is invalid: {error}")
+        print(f"{label}: {default}")
+        return str(default)
     while True:
         value = input(f"{label}{shown}: ").strip()
         if not value:
@@ -83,8 +96,20 @@ def ask(label, default=None, validate=None, help_text=None):
         return value
 
 
+def ask_optional(label, default, shown_default=None):
+    """Free-text prompt where an empty answer is allowed."""
+    if ACCEPT_DEFAULTS:
+        print(f"{label}: {default or shown_default or '(empty)'}")
+        return default
+    hint = default or shown_default or ""
+    return input(f"{label} [{hint}]: ").strip() or default
+
+
 def ask_yes(label, default):
     hint = "Y/n" if default else "y/N"
+    if ACCEPT_DEFAULTS:
+        print(f"{label} {'yes' if default else 'no'}")
+        return default
     while True:
         value = input(f"{label} [{hint}]: ").strip().lower()
         if not value:
@@ -191,6 +216,8 @@ def get_token():
                 print(f"Linode token: from {source}")
                 return token
             print(f"  The token from {source} was rejected by the Linode API.")
+        if ACCEPT_DEFAULTS:
+            die("No valid Linode token. Export LINODE_TOKEN or configure linode-cli.")
         print("  Create one at https://cloud.linode.com/profile/tokens "
               "(Read/Write: Linodes, Firewalls, Volumes; Read: StackScripts).")
         token = getpass.getpass("Linode Personal Access Token (not saved to disk): ").strip()
@@ -239,9 +266,16 @@ def collect_answers():
                            help_text="List: linode-cli regions list, or https://www.linode.com/global-infrastructure/")
     tfvars["instance_type"] = ask("Instance type", tfvars.get("instance_type", "g6-dedicated-4"),
                                   help_text="8 GB minimum. See the Sizing table in README.md.")
+    previous_volume = tfvars.get("data_volume_size_gb", 0)
     tfvars["data_volume_size_gb"] = int(ask(
-        "Data volume size in GB (0 = keep data on the instance disk)",
-        tfvars.get("data_volume_size_gb", 100), validate=check_int(0)))
+        "Extra data volume in GB (0 = use the disk included in the plan)",
+        tfvars.get("data_volume_size_gb", 0), validate=check_int(0),
+        help_text="The plan's local disk is already paid for and faster (160 GB on g6-dedicated-4).\n"
+                  "  Add a Block Storage volume (extra cost) only if you need more space than that."))
+    if previous_volume and not tfvars["data_volume_size_gb"] and load_json(TF_DIR / "terraform.tfstate").get("resources"):
+        print(f"  Warning: this deletes the existing {previous_volume} GB volume and every log stored on it.")
+        if not ask_yes("  Delete the volume?", False):
+            tfvars["data_volume_size_gb"] = previous_volume
     tfvars["backups_enabled"] = ask_yes("Enable Linode Backups (extra cost)?", tfvars.get("backups_enabled", False))
     tfvars["tags"] = split_list(ask("Tags (comma separated)",
                                     ",".join(tfvars.get("tags", ["ds2", "elasticsearch", "kibana"]))))
@@ -284,10 +318,8 @@ def collect_answers():
         print("  Leave the hostname empty to use the instance's reverse DNS name\n"
               "  (<ip-dashed>.ip.linodeusercontent.com, no DNS work needed). A custom hostname\n"
               "  needs an A record pointing to the instance; the deploy waits for it.")
-        hostname = input(f"Certificate hostname [{tfvars.get('tls_hostname') or 'reverse DNS'}]: ").strip()
-        tfvars["tls_hostname"] = hostname if hostname else tfvars.get("tls_hostname", "")
-        local["tls_email"] = input(f"Let's Encrypt email (optional) [{local.get('tls_email', '')}]: ").strip() \
-            or local.get("tls_email", "")
+        tfvars["tls_hostname"] = ask_optional("Certificate hostname", tfvars.get("tls_hostname", ""), "reverse DNS")
+        local["tls_email"] = ask_optional("Let's Encrypt email (optional)", local.get("tls_email", ""))
     else:
         tfvars["tls_hostname"] = ""
 
@@ -298,7 +330,7 @@ def print_plan(tfvars, local):
     section("Review")
     rows = [
         ("Label / region / type", f"{tfvars['label']} / {tfvars['region']} / {tfvars['instance_type']}"),
-        ("Data volume", f"{tfvars['data_volume_size_gb']} GB" if tfvars["data_volume_size_gb"] else "none"),
+        ("Data storage", f"{tfvars['data_volume_size_gb']} GB volume" if tfvars["data_volume_size_gb"] else "plan's local disk"),
         ("Backups", "yes" if tfvars["backups_enabled"] else "no"),
         ("Admin CIDRs", ", ".join(tfvars["allowed_admin_cidrs"])),
         ("SSH", f"{tfvars['ssh_user']} with {local['ssh_key']}"),
@@ -469,7 +501,8 @@ def summary(outputs):
 def cmd_deploy(_args):
     require_tools()
     print(bold("ds2-elk-tf: Akamai DataStream 2 -> Elasticsearch + Kibana on Akamai Cloud"))
-    print("Press Enter to accept the value in [brackets].")
+    if not ACCEPT_DEFAULTS:
+        print("Press Enter to accept the value in [brackets].")
     token = get_token()
 
     tfvars, local = collect_answers()
@@ -520,7 +553,12 @@ def cmd_destroy(_args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command", nargs="?", default="deploy", choices=["deploy", "post-install", "summary", "destroy"])
+    parser.add_argument("-d", "--defaults", action="store_true",
+                        help="deploy: accept every default (previous answers, generated passwords, "
+                             "detected IP) and skip the confirmations")
     args = parser.parse_args()
+    global ACCEPT_DEFAULTS
+    ACCEPT_DEFAULTS = args.defaults and args.command == "deploy"
     commands = {"deploy": cmd_deploy, "post-install": cmd_post_install, "summary": cmd_summary, "destroy": cmd_destroy}
     try:
         commands[args.command](args)
