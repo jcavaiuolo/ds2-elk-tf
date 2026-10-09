@@ -61,24 +61,23 @@ variable "ssh_user_password" {
 }
 
 ########################################
-# StackScript (forked from Hideki Okamoto's original)
+# StackScript
 ########################################
+#
+# Default points at Hideki Okamoto's original StackScript (1059555). Its UDFs
+# are: username, password, pubkey, disable_root, elasticsearch_password,
+# ds2_username, ds2_password. The elasticsearch_password is shared with Kibana.
+# Swap the ID when the fork is published.
 
 variable "stackscript_id" {
   type        = number
-  description = "ID of the StackScript that installs Elasticsearch and Kibana. Default is Hideki's original (1059555); replace with your fork once published."
+  description = "ID of the StackScript that installs Elasticsearch and Kibana."
   default     = 1059555
 }
 
 variable "es_admin_password" {
   type        = string
-  description = "Password for the Elasticsearch 'elastic' admin user."
-  sensitive   = true
-}
-
-variable "kibana_admin_password" {
-  type        = string
-  description = "Password for the Kibana admin user."
+  description = "Password for the Elasticsearch 'elastic' user (shared with Kibana in Hideki's StackScript)."
   sensitive   = true
 }
 
@@ -92,6 +91,12 @@ variable "ds2_ingest_password" {
   type        = string
   description = "Password for the DS2 ingest user."
   sensitive   = true
+}
+
+variable "disable_root_ssh" {
+  type        = bool
+  description = "Disable root login over SSH. Recommended."
+  default     = true
 }
 
 ########################################
@@ -156,47 +161,21 @@ variable "kibana_port" {
 }
 
 ########################################
-# ILM snapshot repo (Akamai Cloud Object Storage)
+# Post-install HTTPS (manual)
 ########################################
-
-variable "object_storage_bucket" {
-  type        = string
-  description = "Optional. If set, StackScript registers an S3 snapshot repo targeting this bucket."
-  default     = ""
-}
-
-variable "object_storage_region" {
-  type        = string
-  description = "Object Storage region slug for the endpoint, e.g. us-east-1, ap-south-1."
-  default     = "us-east-1"
-}
-
-variable "object_storage_access_key" {
-  type        = string
-  description = "Object Storage access key for the snapshot repo."
-  sensitive   = true
-  default     = ""
-}
-
-variable "object_storage_secret_key" {
-  type        = string
-  description = "Object Storage secret key for the snapshot repo."
-  sensitive   = true
-  default     = ""
-}
-
-########################################
-# Let's Encrypt (optional, enables HTTPS on ES HTTP layer)
-########################################
+# Hideki's StackScript does not configure Let's Encrypt. If you flip this on,
+# the firewall opens ports 80 and 443 so you can SSH in and run certbot
+# yourself after boot, then flip xpack.security.http.ssl on in elasticsearch.yml
+# and swap the DS2 endpoint to https://. The fork plan automates this.
 
 variable "enable_lets_encrypt" {
   type        = bool
   default     = false
-  description = "If true, StackScript runs certbot --standalone and swaps HTTPS on."
+  description = "Open ports 80 and 443 on the firewall so you can run certbot post-install."
 }
 
 variable "public_hostname" {
   type        = string
   default     = ""
-  description = "Hostname for Let's Encrypt. Required when enable_lets_encrypt is true."
+  description = "Hostname you plan to serve HTTPS from. Used in outputs when enable_lets_encrypt is true."
 }

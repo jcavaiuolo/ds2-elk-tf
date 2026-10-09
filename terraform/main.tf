@@ -105,21 +105,16 @@ resource "linode_instance" "elk" {
 
   stackscript_id = var.stackscript_id
 
-  # UDF values passed to the StackScript. Field names must match the UDFs in the
-  # forked StackScript. Rename to match the original if you keep stackscript_id = 1059555.
+  # UDF names match Hideki Okamoto's StackScript 1059555. Rename when you fork
+  # and your UDFs diverge.
   stackscript_data = {
-    SSH_USER                  = var.ssh_user
-    SSH_USER_PASSWORD         = var.ssh_user_password
-    ES_ADMIN_PASSWORD         = var.es_admin_password
-    KIBANA_ADMIN_PASSWORD     = var.kibana_admin_password
-    DS2_INGEST_USER           = var.ds2_ingest_user
-    DS2_INGEST_PASSWORD       = var.ds2_ingest_password
-    OBJECT_STORAGE_BUCKET     = var.object_storage_bucket
-    OBJECT_STORAGE_REGION     = var.object_storage_region
-    OBJECT_STORAGE_ACCESS_KEY = var.object_storage_access_key
-    OBJECT_STORAGE_SECRET_KEY = var.object_storage_secret_key
-    ENABLE_LETS_ENCRYPT       = tostring(var.enable_lets_encrypt)
-    PUBLIC_HOSTNAME           = var.public_hostname
+    username               = var.ssh_user
+    password               = var.ssh_user_password
+    pubkey                 = length(var.authorized_keys) > 0 ? var.authorized_keys[0] : ""
+    disable_root           = var.disable_root_ssh ? "Yes" : "No"
+    elasticsearch_password = var.es_admin_password
+    ds2_username           = var.ds2_ingest_user
+    ds2_password           = var.ds2_ingest_password
   }
 
   # If use_vpc is on, attach a VPC interface in addition to the default public one.

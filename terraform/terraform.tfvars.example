@@ -4,11 +4,10 @@
 
 # Rename to terraform.tfvars and fill in. All *_password values should be strong.
 
-root_password         = "CHANGE-ME-root"
-ssh_user_password     = "CHANGE-ME-ssh"
-es_admin_password     = "CHANGE-ME-elastic"
-kibana_admin_password = "CHANGE-ME-kibana"
-ds2_ingest_password   = "CHANGE-ME-ingest"
+root_password       = "CHANGE-ME-root"
+ssh_user_password   = "CHANGE-ME-ssh"
+es_admin_password   = "CHANGE-ME-elastic-and-kibana"
+ds2_ingest_password = "CHANGE-ME-ingest"
 
 authorized_keys = [
   "ssh-ed25519 AAAA... you@laptop"
@@ -45,16 +44,7 @@ allowed_admin_cidrs = ["203.0.113.10/32"]
 # ]
 
 ########################################
-# Optional: Object Storage snapshot repo
-########################################
-
-# object_storage_bucket     = "ds2-snapshots"
-# object_storage_region     = "us-east-1"
-# object_storage_access_key = "AKI..."
-# object_storage_secret_key = "..."
-
-########################################
-# Optional: Let's Encrypt
+# Optional: open 80/443 on firewall for post-install certbot
 ########################################
 
 # enable_lets_encrypt = true
