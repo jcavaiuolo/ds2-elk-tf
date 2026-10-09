@@ -22,8 +22,8 @@ variable "instance_type" {
 
 variable "image" {
   type        = string
-  description = "Image slug for the instance."
-  default     = "linode/ubuntu24.04"
+  description = "Image slug for the instance. Must match the StackScript's supported image list; Hideki's 1059555 is pinned to Ubuntu 22.04."
+  default     = "linode/ubuntu22.04"
 }
 
 variable "tags" {
