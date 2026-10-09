@@ -16,7 +16,7 @@ answer a few questions (press Enter to accept the value in `[brackets]`, or run 
 |---|---|
 | **Guided setup** | Asks for everything Terraform needs, with defaults: region, instance type, generated passwords, your public IP for the admin allowlist, an SSH key (created if missing). Answers are saved and become the defaults on the next run. |
 | **Locked-down firewall** | SSH and Kibana only from your IP. Elasticsearch only from the Akamai IP ACL, downloaded fresh from Akamai on every deploy. The firewall is attached at creation, so the instance is never open while installing. |
-| **Data volume** | A Block Storage volume is formatted and mounted as the Elasticsearch data directory (`/var/lib/elasticsearch`). Grow it without touching the instance. |
+| **Optional data volume** | By default Elasticsearch uses the plan's local disk (already paid for, and faster). If you need more space, the wrapper attaches a Block Storage volume, formats it and mounts it as `/var/lib/elasticsearch`. |
 | **Retention** | Hideki's ILM policy never deletes, so the disk eventually fills up. The wrapper adds a delete phase (7 days by default). |
 | **Optional HTTPS** | nginx + Let's Encrypt on 443 in front of Elasticsearch, so DataStream 2 credentials and logs travel encrypted. |
 | **Akamai Debug dashboard** | 15 extra panels for troubleshooting, imported automatically (see below). |
@@ -41,7 +41,7 @@ What it asks:
 | Question | Default |
 |----------|---------|
 | Label, region, instance type | `ds2-elk`, `us-east`, `g6-dedicated-4` (8 GB) |
-| Data volume size | `100` GB (`0` = data stays on the instance disk) |
+| Extra data volume | `0` (data on the plan's local disk); a size in GB adds a Block Storage volume |
 | Linode Backups | no |
 | Tags | `ds2,elasticsearch,kibana` |
 | CIDRs allowed to SSH and Kibana | your current public IP `/32` |
@@ -58,9 +58,9 @@ Passwords are limited to letters, digits, `_` and `-`, because the StackScript p
 
 Then it:
 
-1. Shows a review and runs `terraform init`, `plan`, and (after you confirm) `apply`. That creates the firewall, the instance running Hideki's StackScript, and the volume.
+1. Shows a review and runs `terraform init`, `plan`, and (after you confirm) `apply`. That creates the firewall, the instance running Hideki's StackScript, and the volume if you asked for one.
 2. Waits for the StackScript to finish, about 10 minutes. It prints an `ssh ... tail -f /var/log/stackscript.log` command if you want to watch.
-3. Runs [`remote/post-install.sh`](remote/post-install.sh) on the instance over SSH (with sudo). It moves the Elasticsearch data onto the volume, applies retention, sets up HTTPS if requested and imports the Akamai Debug dashboard. Every step is idempotent.
+3. Runs [`remote/post-install.sh`](remote/post-install.sh) on the instance over SSH (with sudo). It moves the Elasticsearch data onto the volume (if any), applies retention, sets up HTTPS if requested and imports the Akamai Debug dashboard. Every step is idempotent.
 4. Prints the Kibana URL and login, the SSH command, and the DataStream 2 destination settings.
 
 Settings and passwords are saved in `terraform/terraform.tfvars.json` and `terraform/deploy.local.json` (gitignored, `chmod 600`). Keep a copy in your password manager.
@@ -157,15 +157,17 @@ If Akamai changes the list, the next `python3 deploy.py` shows the firewall diff
 
 Rough rule of thumb, based on about 1 to 1.5 KB uncompressed per DS2 CDN log document (CMCD and breadcrumbs add about 30%):
 
-| Sustained RPS at edge | Daily raw log volume | Instance type | Data volume |
-|-----------------------|----------------------|---------------|-------------|
-| < 50 | 1-2 GB | `g6-dedicated-4` (8 GB) | 50 GB |
-| 50-200 | 5-20 GB | `g6-dedicated-4` | 100 GB (default) |
-| 200-500 | 20-50 GB | `g6-dedicated-8` (16 GB) | 200 GB |
-| 500-2000 | 50-200 GB | multi-node, 32 GB each | 500 GB each |
+| Sustained RPS at edge | Daily raw log volume | Instance type (local disk) | Extra volume, 7-day retention |
+|-----------------------|----------------------|----------------------------|-------------------------------|
+| < 50 | 1-2 GB | `g6-dedicated-4` (8 GB RAM, 160 GB) | none (default) |
+| 50-200 | 5-20 GB | `g6-dedicated-4` (8 GB RAM, 160 GB) | none up to ~15 GB/day, else 100-200 GB |
+| 200-500 | 20-50 GB | `g6-dedicated-8` (16 GB RAM, 320 GB) | 200 GB at the top of the range |
+| 500-2000 | 50-200 GB | multi-node, 32 GB RAM each | 500 GB each |
 | > 2000 | 200+ GB | LKE + ECK | per-node |
 
-Re-run `python3 deploy.py` with a bigger instance type or volume. Linode resizes the volume online, but the ext4 filesystem must then be grown by hand (`sudo resize2fs /dev/disk/by-id/scsi-0Linode_Volume_<label>-data`). The single-node rows are what this repo deploys. Above that, see `docs/blog-post.md`. The sampling rate in the DataStream behavior is the fastest escape valve: 10 or 25 instead of 100 cuts volume linearly.
+The plan's local disk comes with the instance price and is faster than network Block Storage, so use it first. Keep about 25% free: Elasticsearch stops allocating shards above its 85% disk watermark. Add a volume only when the data outgrows the local disk (longer retention, higher RPS) and you don't want a bigger plan.
+
+Re-run `python3 deploy.py` with a bigger instance type or volume size. Adding a volume to an existing deploy moves the data onto it. Going back to `0` deletes the volume and the logs on it (the wrapper asks first). Linode resizes volumes online, but you then grow the ext4 filesystem by hand (`sudo resize2fs /dev/disk/by-id/scsi-0Linode_Volume_<label>-data`). The single-node rows are what this repo deploys. Above that, see `docs/blog-post.md`. The sampling rate in the DataStream behavior is the fastest escape valve: 10 or 25 instead of 100 cuts volume linearly.
 
 ## Retention
 
@@ -204,7 +206,7 @@ To change it, re-run `python3 deploy.py` (or `post-install`) with a new value. S
 | Path | Purpose |
 |------|---------|
 | `deploy.py` | The interactive wrapper. Python standard library only. |
-| `terraform/` | Firewall, instance (Hideki's StackScript) and data volume. |
+| `terraform/` | Firewall, instance (Hideki's StackScript) and optional data volume. |
 | `remote/post-install.sh` | Runs on the instance after the StackScript: volume, retention, HTTPS, dashboard import. |
 | `kibana/akamai-debug.ndjson` | The Akamai Debug dashboard. |
 | `tools/build-debug-dashboard.py` | Regenerates the NDJSON above. Only needed to edit the dashboard. |

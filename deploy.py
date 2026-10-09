@@ -266,9 +266,16 @@ def collect_answers():
                            help_text="List: linode-cli regions list, or https://www.linode.com/global-infrastructure/")
     tfvars["instance_type"] = ask("Instance type", tfvars.get("instance_type", "g6-dedicated-4"),
                                   help_text="8 GB minimum. See the Sizing table in README.md.")
+    previous_volume = tfvars.get("data_volume_size_gb", 0)
     tfvars["data_volume_size_gb"] = int(ask(
-        "Data volume size in GB (0 = keep data on the instance disk)",
-        tfvars.get("data_volume_size_gb", 100), validate=check_int(0)))
+        "Extra data volume in GB (0 = use the disk included in the plan)",
+        tfvars.get("data_volume_size_gb", 0), validate=check_int(0),
+        help_text="The plan's local disk is already paid for and faster (160 GB on g6-dedicated-4).\n"
+                  "  Add a Block Storage volume (extra cost) only if you need more space than that."))
+    if previous_volume and not tfvars["data_volume_size_gb"] and load_json(TF_DIR / "terraform.tfstate").get("resources"):
+        print(f"  Warning: this deletes the existing {previous_volume} GB volume and every log stored on it.")
+        if not ask_yes("  Delete the volume?", False):
+            tfvars["data_volume_size_gb"] = previous_volume
     tfvars["backups_enabled"] = ask_yes("Enable Linode Backups (extra cost)?", tfvars.get("backups_enabled", False))
     tfvars["tags"] = split_list(ask("Tags (comma separated)",
                                     ",".join(tfvars.get("tags", ["ds2", "elasticsearch", "kibana"]))))
@@ -323,7 +330,7 @@ def print_plan(tfvars, local):
     section("Review")
     rows = [
         ("Label / region / type", f"{tfvars['label']} / {tfvars['region']} / {tfvars['instance_type']}"),
-        ("Data volume", f"{tfvars['data_volume_size_gb']} GB" if tfvars["data_volume_size_gb"] else "none"),
+        ("Data storage", f"{tfvars['data_volume_size_gb']} GB volume" if tfvars["data_volume_size_gb"] else "plan's local disk"),
         ("Backups", "yes" if tfvars["backups_enabled"] else "no"),
         ("Admin CIDRs", ", ".join(tfvars["allowed_admin_cidrs"])),
         ("SSH", f"{tfvars['ssh_user']} with {local['ssh_key']}"),
