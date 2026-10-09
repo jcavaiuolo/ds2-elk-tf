@@ -6,7 +6,7 @@ then export it to NDJSON so the file is Kibana's canonical shape.
 Usage:
     KIBANA_URL=http://50.116.48.142:5601 \
     KIBANA_USER=elastic KIBANA_PASS=... \
-    python3 scripts/build-debug-dashboard.py
+    python3 tools/build-debug-dashboard.py
 
 Writes:
     kibana/akamai-debug.ndjson
@@ -653,7 +653,7 @@ def export_ndjson():
     r = urllib.request.Request(url, data=data, headers=HEADERS, method="POST")
     with urllib.request.urlopen(r, timeout=60) as resp:
         content = resp.read().decode()
-    out_path = Path("kibana/akamai-debug.ndjson")
+    out_path = Path(__file__).resolve().parent.parent / "kibana" / "akamai-debug.ndjson"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content)
     lines = content.strip().split("\n")

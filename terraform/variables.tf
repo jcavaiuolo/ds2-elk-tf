@@ -4,7 +4,7 @@
 
 variable "label" {
   type        = string
-  description = "Prefix for all created resources (instance, firewall, volume, VPC)."
+  description = "Prefix for all created resources (instance, firewall, volume)."
   default     = "ds2-elk"
 }
 
@@ -22,7 +22,7 @@ variable "instance_type" {
 
 variable "image" {
   type        = string
-  description = "Image slug for the instance. Must match the StackScript's supported image list; Hideki's 1059555 is pinned to Ubuntu 22.04."
+  description = "Image slug. StackScript 1059555 only supports Ubuntu 22.04."
   default     = "linode/ubuntu22.04"
 }
 
@@ -30,6 +30,12 @@ variable "tags" {
   type        = list(string)
   description = "Tags to apply to created resources."
   default     = ["ds2", "elasticsearch", "kibana"]
+}
+
+variable "backups_enabled" {
+  type        = bool
+  description = "Enable the Linode Backup service on the instance (billed separately)."
+  default     = false
 }
 
 ########################################
@@ -44,30 +50,31 @@ variable "root_password" {
 
 variable "authorized_keys" {
   type        = list(string)
-  description = "SSH public keys installed into root's authorized_keys at provision time."
+  description = "SSH public keys. The first one is also installed for ssh_user by the StackScript."
   default     = []
 }
 
 variable "ssh_user" {
   type        = string
-  description = "Non-root user created by the StackScript for SSH login."
-  default     = "ec2-user"
+  description = "Limited sudo user created by the StackScript."
+  default     = "elkadmin"
 }
 
 variable "ssh_user_password" {
   type        = string
-  description = "Initial password for the non-root SSH user."
+  description = "Password for ssh_user (used for sudo)."
   sensitive   = true
 }
 
+variable "disable_root_ssh" {
+  type        = bool
+  description = "StackScript UDF disable_root: disables root login and password authentication over SSH."
+  default     = true
+}
+
 ########################################
-# StackScript
+# StackScript (Hideki Okamoto, 1059555)
 ########################################
-#
-# Default points at Hideki Okamoto's original StackScript (1059555). Its UDFs
-# are: username, password, pubkey, disable_root, elasticsearch_password,
-# ds2_username, ds2_password. The elasticsearch_password is shared with Kibana.
-# Swap the ID when the fork is published.
 
 variable "stackscript_id" {
   type        = number
@@ -77,13 +84,13 @@ variable "stackscript_id" {
 
 variable "es_admin_password" {
   type        = string
-  description = "Password for the Elasticsearch 'elastic' user (shared with Kibana in Hideki's StackScript)."
+  description = "Password for the Elasticsearch 'elastic' user (also the Kibana login)."
   sensitive   = true
 }
 
 variable "ds2_ingest_user" {
   type        = string
-  description = "Elasticsearch user DataStream 2 will use to POST to the _bulk endpoint."
+  description = "Elasticsearch user DataStream 2 uses to POST to the _bulk endpoint."
   default     = "ds2_ingest"
 }
 
@@ -93,89 +100,76 @@ variable "ds2_ingest_password" {
   sensitive   = true
 }
 
-variable "disable_root_ssh" {
-  type        = bool
-  description = "Disable root login over SSH. Recommended."
-  default     = true
-}
-
 ########################################
 # Storage
 ########################################
 
 variable "data_volume_size_gb" {
   type        = number
-  description = "Size of the attached Block Storage volume used for Elasticsearch data. Set 0 to disable."
+  description = "Block Storage volume for Elasticsearch data, mounted by the post-install step. Set 0 to keep data on the instance disk."
   default     = 100
 }
 
 ########################################
-# Networking: Firewall
+# Networking
 ########################################
 
 variable "allowed_admin_cidrs" {
   type        = list(string)
-  description = "CIDR blocks allowed to reach SSH (22) and Kibana (5601). Lock this down."
-  default     = ["0.0.0.0/0"]
+  description = "CIDRs allowed to reach SSH (22) and Kibana (5601). deploy.py proposes your current public IP."
+
+  validation {
+    condition     = length(var.allowed_admin_cidrs) > 0 && alltrue([for c in var.allowed_admin_cidrs : can(cidrhost(c, 0))])
+    error_message = "allowed_admin_cidrs must be a non-empty list of valid CIDRs, e.g. [\"203.0.113.10/32\"]."
+  }
 }
 
 variable "datastream2_ip_acl" {
   type        = list(string)
-  description = <<EOT
-IPv4/IPv6 ranges from which DataStream 2 pushes logs. Same set used by
-Origin IP ACL for the Akamai CDN (per the DS2 Jan 7, 2026 changelog).
+  description = "Pin the DataStream 2 source ranges. Leave null to download Akamai's current list on every plan."
+  default     = null
+}
 
-Live list source:
-  https://techdocs.akamai.com/origin-ip-acl/docs/update-your-origin-server
-  https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt
-  https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv6_CIDRs.txt
+variable "akamai_ipv4_acl_url" {
+  type        = string
+  description = "Akamai's published IPv4 Origin IP ACL list (also used by DataStream 2)."
+  default     = "https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv4_CIDRs.txt"
+}
 
-Values below mirror the list as of 2026-10-09.
-Subscribe to the Firewall Rules Notification tool in Control Center for updates.
-EOT
-  default = [
-    # IPv4
-    "2.16.0.0/13",
-    "23.0.0.0/12",
-    "23.32.0.0/11",
-    "23.192.0.0/11",
-    "95.100.0.0/15",
-    "184.24.0.0/13",
-    # IPv6
-    "2a02:26f0::/32",
-    "2600:1400::/24",
-    "2405:9600::/32",
-  ]
+variable "akamai_ipv6_acl_url" {
+  type        = string
+  description = "Akamai's published IPv6 Origin IP ACL list (also used by DataStream 2)."
+  default     = "https://techdocs.akamai.com/property-manager/pdfs/akamai_ipv6_CIDRs.txt"
 }
 
 variable "elasticsearch_port" {
   type        = number
-  description = "ES HTTP port exposed to DS2 ACL ranges."
+  description = "Elasticsearch HTTP port exposed to the DS2 ACL when TLS is off."
   default     = 9200
 }
 
 variable "kibana_port" {
   type        = number
-  description = "Kibana HTTP port exposed to admin ACL ranges."
+  description = "Kibana HTTP port exposed to the admin CIDRs."
   default     = 5601
 }
 
 ########################################
-# Post-install HTTPS (manual)
+# Optional HTTPS for the DS2 endpoint
 ########################################
-# Hideki's StackScript does not configure Let's Encrypt. If you flip this on,
-# the firewall opens ports 80 and 443 so you can SSH in and run certbot
-# yourself after boot, then flip xpack.security.http.ssl on in elasticsearch.yml
-# and swap the DS2 endpoint to https://. The fork plan automates this.
+#
+# When enabled, the post-install step puts nginx with a Let's Encrypt
+# certificate in front of Elasticsearch on 443, and the firewall swaps
+# 9200 for 443 (DS2 ACL) plus 80 (world, ACME HTTP-01 challenge + renewals).
 
-variable "enable_lets_encrypt" {
+variable "enable_tls" {
   type        = bool
+  description = "Serve the DS2 endpoint over HTTPS (nginx + Let's Encrypt)."
   default     = false
-  description = "Open ports 80 and 443 on the firewall so you can run certbot post-install."
 }
 
-variable "public_hostname" {
+variable "tls_hostname" {
   type        = string
+  description = "Hostname for the certificate. Empty = the instance's reverse DNS name (<ip-dashed>.ip.linodeusercontent.com)."
   default     = ""
-  description = "Hostname you plan to serve HTTPS from. Used in outputs when enable_lets_encrypt is true."
 }
