@@ -360,6 +360,8 @@ curl -s -u elastic:<es_admin_password> \
 
 The policy applies to all indices matching the `datastream2-*` pattern (via the index template that Hideki's StackScript installs). Existing indices older than 7 days get deleted on the next ILM run.
 
+Age-based retention has a blind spot: a traffic spike can fill the disk before the window ends. At 95% Elasticsearch flips the indices to read-only and DataStream 2 uploads start failing. `deploy.py` therefore adds a second layer: a systemd timer on the instance that, every 15 minutes, deletes the oldest `datastream2-*` indices (never the write index) while the disk is above a threshold, 75% by default. It also switches the index template to `best_compression`, force-merges each index after rollover and sets replicas to 0, which a single node can never allocate anyway. And the cheapest saving remains upstream: a sampling rate of 25 and a trimmed data set in the DataStream configuration.
+
 If you want hot indices archived to Akamai Cloud Object Storage before deletion, register an S3 snapshot repository and add a `cold` phase with a `searchable_snapshot` action. Object Storage is S3-compatible so the native `repository-s3` plugin works out of the box.
 
 ## Production checklist

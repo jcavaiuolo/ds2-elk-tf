@@ -307,6 +307,11 @@ def collect_answers():
     local["retention_days"] = int(ask(
         "Delete logs older than N days (0 = keep forever)", local.get("retention_days", 7), validate=check_int(0),
         help_text="Hideki's ILM policy never deletes, so the disk eventually fills up. 7 days suits a debug stack."))
+    local["disk_max_pct"] = int(ask(
+        "Delete the oldest logs when the disk passes N% (0 = off)", local.get("disk_max_pct", 75),
+        validate=lambda v: None if v.isdigit() and (int(v) == 0 or 50 <= int(v) <= 85)
+        else "Enter 0, or a value between 50 and 85 (Elasticsearch stops allocating at 85%).",
+        help_text="Safety net on top of retention: a spike in traffic can fill the disk before N days pass."))
     local["import_dashboard"] = ask_yes("Import the extra 'Akamai Debug' dashboard?", local.get("import_dashboard", True))
 
     section("HTTPS for the DataStream 2 endpoint")
@@ -336,6 +341,7 @@ def print_plan(tfvars, local):
         ("SSH", f"{tfvars['ssh_user']} with {local['ssh_key']}"),
         ("DS2 ingest user", tfvars["ds2_ingest_user"]),
         ("Retention", f"{local['retention_days']} days" if local["retention_days"] else "keep forever"),
+        ("Disk guard", f"delete oldest logs above {local['disk_max_pct']}%" if local["disk_max_pct"] else "off"),
         ("Akamai Debug dashboard", "import" if local["import_dashboard"] else "skip"),
         ("HTTPS", (tfvars["tls_hostname"] or "reverse DNS name") if tfvars["enable_tls"] else "off"),
     ]
@@ -441,6 +447,7 @@ def post_install(outputs):
         "ES_PASSWORD": tfvars["es_admin_password"],
         "VOLUME_DEVICE": outputs.get("volume_filesystem_path") or "",
         "RETENTION_DAYS": str(local.get("retention_days", 0)),
+        "DISK_MAX_PCT": str(local.get("disk_max_pct", 75)),
         "IMPORT_DASHBOARD": "yes" if local.get("import_dashboard", True) else "no",
         "TLS_HOSTNAME": tls_hostname,
         "TLS_EMAIL": local.get("tls_email", ""),
@@ -450,7 +457,8 @@ def post_install(outputs):
     if ssh(outputs, key, "mkdir -p ds2-elk && chmod 700 ds2-elk").returncode != 0:
         die("Could not create ~/ds2-elk on the instance.")
     target = f"{outputs['ssh_user']}@{outputs['public_ipv4']}:ds2-elk/"
-    subprocess.run(["scp", "-q", *ssh_opts(key), str(REMOTE_DIR / "post-install.sh"), str(DASHBOARD), target],
+    subprocess.run(["scp", "-q", *ssh_opts(key), str(REMOTE_DIR / "post-install.sh"),
+                    str(REMOTE_DIR / "disk-guard.py"), str(DASHBOARD), target],
                    check=True)
     if ssh(outputs, key, "umask 077 && cat > ds2-elk/post-install.env", stdin=env_text).returncode != 0:
         die("Could not upload the post-install settings.")

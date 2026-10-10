@@ -17,7 +17,7 @@ answer a few questions (press Enter to accept the value in `[brackets]`, or run 
 | **Guided setup** | Asks for everything Terraform needs, with defaults: region, instance type, generated passwords, your public IP for the admin allowlist, an SSH key (created if missing). Answers are saved and become the defaults on the next run. |
 | **Locked-down firewall** | SSH and Kibana only from your IP. Elasticsearch only from the Akamai IP ACL, downloaded fresh from Akamai on every deploy. The firewall is attached at creation, so the instance is never open while installing. |
 | **Optional data volume** | By default Elasticsearch uses the plan's local disk (already paid for, and faster). If you need more space, the wrapper attaches a Block Storage volume, formats it and mounts it as `/var/lib/elasticsearch`. |
-| **Retention** | Hideki's ILM policy never deletes, so the disk eventually fills up. The wrapper adds a delete phase (7 days by default). |
+| **Disk protection** | Hideki's ILM policy never deletes, so the disk eventually fills up. The wrapper adds age-based retention (7 days by default), a space-based guard that deletes the oldest logs above 75% disk usage, compression and force merge. See [Keeping the disk from filling up](#keeping-the-disk-from-filling-up). |
 | **Optional HTTPS** | nginx + Let's Encrypt on 443 in front of Elasticsearch, so DataStream 2 credentials and logs travel encrypted. |
 | **Akamai Debug dashboard** | 15 extra panels for troubleshooting, imported automatically (see below). |
 | **ES\|QL pack** | [`docs/esql-queries.md`](docs/esql-queries.md), copy-paste queries that match Hideki's field names. |
@@ -51,6 +51,7 @@ What it asks:
 | `elastic` password (Kibana login) | generated |
 | DataStream 2 ingest user and password | `ds2_ingest`, generated |
 | Retention | `7` days (`0` = keep forever) |
+| Delete the oldest logs above N% disk usage | `75` (`0` = off, max `85`) |
 | Import the Akamai Debug dashboard | yes |
 | HTTPS with Let's Encrypt | no; if yes: hostname (empty = the instance's reverse DNS name) and an optional email |
 
@@ -60,7 +61,7 @@ Then it:
 
 1. Shows a review and runs `terraform init`, `plan`, and (after you confirm) `apply`. That creates the firewall, the instance running Hideki's StackScript, and the volume if you asked for one.
 2. Waits for the StackScript to finish, about 10 minutes. It prints an `ssh ... tail -f /var/log/stackscript.log` command if you want to watch.
-3. Runs [`remote/post-install.sh`](remote/post-install.sh) on the instance over SSH (with sudo). It moves the Elasticsearch data onto the volume (if any), applies retention, sets up HTTPS if requested and imports the Akamai Debug dashboard. Every step is idempotent.
+3. Runs [`remote/post-install.sh`](remote/post-install.sh) on the instance over SSH (with sudo). It moves the Elasticsearch data onto the volume (if any), sets up the disk protection, sets up HTTPS if requested and imports the Akamai Debug dashboard. Every step is idempotent.
 4. Prints the Kibana URL and login, the SSH command, and the DataStream 2 destination settings.
 
 Settings and passwords are saved in `terraform/terraform.tfvars.json` and `terraform/deploy.local.json` (gitignored, `chmod 600`). Keep a copy in your password manager.
@@ -101,6 +102,30 @@ To exercise the error panels:
 ```bash
 for i in {1..10}; do curl -s -o /dev/null https://<hostname>/intentional-404-$i; done
 curl -s -o /dev/null -X TRACE https://<hostname>/
+```
+
+## Users and credentials
+
+The deploy creates three identities. They are easy to mix up:
+
+| User | Where it exists | Used for | Credentials |
+|------|-----------------|----------|-------------|
+| `elkadmin` (`ssh_user`) | Linux | SSH into the instance, `sudo` | SSH key `~/.ssh/ds2-elk-tf` (password auth is disabled); `ssh_user_password` for sudo |
+| `elastic` | Elasticsearch | Kibana login, admin API calls | `es_admin_password` |
+| `ds2_ingest` | Elasticsearch only | DataStream 2 pushes (`ds2_writer` role: write to `datastream2*`) | `ds2_ingest_password` |
+
+All passwords are in `terraform/terraform.tfvars.json`, and `python3 deploy.py summary` prints the SSH command and the DataStream 2 credentials:
+
+```bash
+ssh -i ~/.ssh/ds2-elk-tf elkadmin@<ip>
+
+# on the instance: check the ingest user
+curl -s -u ds2_ingest:<ds2_ingest_password> localhost:9200/_security/_authenticate?pretty
+
+# on the instance: disk guard and cluster state
+systemctl list-timers ds2-elk-disk-guard.timer
+sudo journalctl -u ds2-elk-disk-guard
+curl -s -u elastic:<es_admin_password> localhost:9200/_cluster/health?pretty   # "green"
 ```
 
 ## Commands
@@ -169,21 +194,36 @@ The plan's local disk comes with the instance price and is faster than network B
 
 Re-run `python3 deploy.py` with a bigger instance type or volume size. Adding a volume to an existing deploy moves the data onto it. Going back to `0` deletes the volume and the logs on it (the wrapper asks first). Linode resizes volumes online, but you then grow the ext4 filesystem by hand (`sudo resize2fs /dev/disk/by-id/scsi-0Linode_Volume_<label>-data`). The single-node rows are what this repo deploys. Above that, see `docs/blog-post.md`. The sampling rate in the DataStream behavior is the fastest escape valve: 10 or 25 instead of 100 cuts volume linearly.
 
-## Retention
+## Keeping the disk from filling up
 
-Hideki's `datastream2-ilm` policy rolls the write index over at 30 days or 50 GB and never deletes anything. With retention set to N days, the post-install rewrites the policy to roll over daily (or at 10 GB) and delete each index N days after its rollover. Disk usage then stays at roughly N+1 days of logs.
+When the data disk passes 95%, Elasticsearch turns the indices read-only. Ingestion stops, DataStream 2 reports upload failures and those logs are lost. The post-install sets up four layers so that never happens:
 
-| Use case | Retention |
-|----------|-----------|
-| Live debug stack | 7 days (default) |
-| Weekly report feed | 30 days |
-| Compliance archive | 0 (keep forever) and snapshot to Object Storage |
+| Layer | What it does |
+|-------|--------------|
+| **Retention by age** | Hideki's `datastream2-ilm` policy rolls the write index over at 30 days or 50 GB and never deletes. With retention set to N days, the policy rolls over daily (or at 10 GB) and deletes each index N days after its rollover, so the disk holds about N+1 days of logs. |
+| **Guard by space** | A systemd timer (`ds2-elk-disk-guard.timer`) checks the data disk every 15 minutes. Above the threshold (75% by default) it deletes the oldest `datastream2-*` indices, never the one being written, until usage drops back. This covers traffic spikes that would fill the disk before the retention window ends. Logs: `journalctl -u ds2-elk-disk-guard`. |
+| **Compression** | The index template switches to `best_compression` (typically 15-25% smaller, a bit more CPU at indexing). The ILM `warm` phase force-merges each rolled index to one segment and recompresses it. |
+| **No replicas** | The template and the existing indices use 0 replicas. On a single node a replica can never be allocated anyway; this turns the cluster `green` instead of `yellow`. |
 
-To change it, re-run `python3 deploy.py` (or `post-install`) with a new value. Setting `0` later does not restore Hideki's original policy.
+| Use case | Retention | Guard |
+|----------|-----------|-------|
+| Live debug stack | 7 days (default) | 75% (default) |
+| Weekly report feed | 30 days | 75% |
+| Compliance archive | 0 (keep forever) and snapshot to Object Storage | 0 (off), size the disk instead |
+
+To change either value, re-run `python3 deploy.py` (or `post-install`). If the guard logs that only the write index is left, the disk is too small for even one day of traffic: send less data or grow the disk.
+
+### Sending less data
+
+The cheapest disk is the one you never write. In the DataStream 2 configuration:
+
+- **Sampling rate** in the DataStream behavior: 25 instead of 100 cuts volume to a quarter. Most debug views (error rates, top paths, cache ratio) stay representative.
+- **Data set fields** in the stream: drop what you don't query. `cookie`, `UA`, `queryStr`, `referer`, `breadcrumbs` and `customField` are usually the largest per document.
+- **Separate streams** per property if only some of them need full detail.
 
 ## Using Terraform directly
 
-`terraform/` is a plain module, and `deploy.py` only writes `terraform/terraform.tfvars.json` and calls it. Required variables: `root_password`, `ssh_user_password`, `es_admin_password`, `ds2_ingest_password`, `allowed_admin_cidrs`, plus `authorized_keys` with your public key. See `terraform/variables.tf` for the rest. The post-install step (volume, retention, HTTPS, dashboard) still needs `python3 deploy.py post-install`, which reads the same `terraform.tfvars.json`.
+`terraform/` is a plain module, and `deploy.py` only writes `terraform/terraform.tfvars.json` and calls it. Required variables: `root_password`, `ssh_user_password`, `es_admin_password`, `ds2_ingest_password`, `allowed_admin_cidrs`, plus `authorized_keys` with your public key. See `terraform/variables.tf` for the rest. The post-install step (volume, disk protection, HTTPS, dashboard) still needs `python3 deploy.py post-install`, which reads the same `terraform.tfvars.json`.
 
 ## Troubleshooting
 
@@ -199,6 +239,9 @@ To change it, re-run `python3 deploy.py` (or `post-install`) with a new value. S
       'curl -s -u elastic:<es_admin_password> http://localhost:9200/datastream2*/_count'
   ```
 - **Pushes come from IPs outside the ACL**: pin `datastream2_ip_acl` to `["0.0.0.0/0", "::/0"]` briefly, capture with `tcpdump` on the instance, then remove the pin.
+- **DataStream 2 uploads fail and Elasticsearch logs `flood stage disk watermark exceeded`**: the disk filled up. Check `journalctl -u ds2-elk-disk-guard` and `df -h /var/lib/elasticsearch`. After freeing space, Elasticsearch lifts the read-only block by itself.
+- **`ssh ds2_ingest@<ip>`: Permission denied (publickey)**: `ds2_ingest` is an Elasticsearch user, not a Linux account. SSH in as `elkadmin` with `-i ~/.ssh/ds2-elk-tf` (see [Users and credentials](#users-and-credentials)).
+- **`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`**: Linode often hands the same IPv4 back when you redeploy in the same region, so your `~/.ssh/known_hosts` still has the old instance's host key. Forget it with `ssh-keygen -R <ip>`. `deploy.py` keeps its own `terraform/known_hosts` and clears it for new instances, so only your manual `ssh` hits this.
 - **Kibana login loops**: `sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic`, then put the new password in `terraform.tfvars.json`.
 
 ## Layout
@@ -207,7 +250,8 @@ To change it, re-run `python3 deploy.py` (or `post-install`) with a new value. S
 |------|---------|
 | `deploy.py` | The interactive wrapper. Python standard library only. |
 | `terraform/` | Firewall, instance (Hideki's StackScript) and optional data volume. |
-| `remote/post-install.sh` | Runs on the instance after the StackScript: volume, retention, HTTPS, dashboard import. |
+| `remote/post-install.sh` | Runs on the instance after the StackScript: volume, disk protection, HTTPS, dashboard import. |
+| `remote/disk-guard.py` | Installed on the instance; deletes the oldest indices when the disk passes the threshold. |
 | `kibana/akamai-debug.ndjson` | The Akamai Debug dashboard. |
 | `tools/build-debug-dashboard.py` | Regenerates the NDJSON above. Only needed to edit the dashboard. |
 | `docs/esql-queries.md` | ES\|QL query pack for Hideki's index. |
