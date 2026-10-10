@@ -104,6 +104,30 @@ for i in {1..10}; do curl -s -o /dev/null https://<hostname>/intentional-404-$i;
 curl -s -o /dev/null -X TRACE https://<hostname>/
 ```
 
+## Users and credentials
+
+The deploy creates three identities. They are easy to mix up:
+
+| User | Where it exists | Used for | Credentials |
+|------|-----------------|----------|-------------|
+| `elkadmin` (`ssh_user`) | Linux | SSH into the instance, `sudo` | SSH key `~/.ssh/ds2-elk-tf` (password auth is disabled); `ssh_user_password` for sudo |
+| `elastic` | Elasticsearch | Kibana login, admin API calls | `es_admin_password` |
+| `ds2_ingest` | Elasticsearch only | DataStream 2 pushes (`ds2_writer` role: write to `datastream2*`) | `ds2_ingest_password` |
+
+All passwords are in `terraform/terraform.tfvars.json`, and `python3 deploy.py summary` prints the SSH command and the DataStream 2 credentials:
+
+```bash
+ssh -i ~/.ssh/ds2-elk-tf elkadmin@<ip>
+
+# on the instance: check the ingest user
+curl -s -u ds2_ingest:<ds2_ingest_password> localhost:9200/_security/_authenticate?pretty
+
+# on the instance: disk guard and cluster state
+systemctl list-timers ds2-elk-disk-guard.timer
+sudo journalctl -u ds2-elk-disk-guard
+curl -s -u elastic:<es_admin_password> localhost:9200/_cluster/health?pretty   # "green"
+```
+
 ## Commands
 
 | Command | What it does |
@@ -216,6 +240,8 @@ The cheapest disk is the one you never write. In the DataStream 2 configuration:
   ```
 - **Pushes come from IPs outside the ACL**: pin `datastream2_ip_acl` to `["0.0.0.0/0", "::/0"]` briefly, capture with `tcpdump` on the instance, then remove the pin.
 - **DataStream 2 uploads fail and Elasticsearch logs `flood stage disk watermark exceeded`**: the disk filled up. Check `journalctl -u ds2-elk-disk-guard` and `df -h /var/lib/elasticsearch`. After freeing space, Elasticsearch lifts the read-only block by itself.
+- **`ssh ds2_ingest@<ip>`: Permission denied (publickey)**: `ds2_ingest` is an Elasticsearch user, not a Linux account. SSH in as `elkadmin` with `-i ~/.ssh/ds2-elk-tf` (see [Users and credentials](#users-and-credentials)).
+- **`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`**: Linode often hands the same IPv4 back when you redeploy in the same region, so your `~/.ssh/known_hosts` still has the old instance's host key. Forget it with `ssh-keygen -R <ip>`. `deploy.py` keeps its own `terraform/known_hosts` and clears it for new instances, so only your manual `ssh` hits this.
 - **Kibana login loops**: `sudo /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic`, then put the new password in `terraform.tfvars.json`.
 
 ## Layout
